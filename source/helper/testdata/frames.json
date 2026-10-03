@@ -1,0 +1,64 @@
+{
+  "frames": [
+    {
+      "name": "request",
+      "type": 1,
+      "payload_hex": "7b2261726776223a5b226964222c222d75222c22646576225d2c2275736572223a22646576222c22637764223a222f6275696c642f776f726b222c22656e76223a7b2241223a2262227d7d",
+      "wire_hex": "010000004b7b2261726776223a5b226964222c222d75222c22646576225d2c2275736572223a22646576222c22637764223a222f6275696c642f776f726b222c22656e76223a7b2241223a2262227d7d"
+    },
+    {
+      "name": "stdin",
+      "type": 2,
+      "payload_hex": "68656c6c6f",
+      "wire_hex": "020000000568656c6c6f"
+    },
+    {
+      "name": "stdin_eof",
+      "type": 2,
+      "payload_hex": "",
+      "wire_hex": "0200000000"
+    },
+    {
+      "name": "stdout",
+      "type": 3,
+      "payload_hex": "6f75740a",
+      "wire_hex": "03000000046f75740a"
+    },
+    {
+      "name": "stderr",
+      "type": 4,
+      "payload_hex": "6572720a",
+      "wire_hex": "04000000046572720a"
+    },
+    {
+      "name": "exit_0",
+      "type": 5,
+      "payload_hex": "00000000",
+      "wire_hex": "050000000400000000"
+    },
+    {
+      "name": "exit_3",
+      "type": 5,
+      "payload_hex": "00000003",
+      "wire_hex": "050000000400000003"
+    },
+    {
+      "name": "exit_137",
+      "type": 5,
+      "payload_hex": "00000089",
+      "wire_hex": "050000000400000089"
+    },
+    {
+      "name": "exit_negative",
+      "type": 5,
+      "payload_hex": "ffffffff",
+      "wire_hex": "0500000004ffffffff"
+    },
+    {
+      "name": "kill",
+      "type": 6,
+      "payload_hex": "",
+      "wire_hex": "0600000000"
+    }
+  ]
+}
