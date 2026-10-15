@@ -8,6 +8,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -54,6 +55,34 @@ func TestTheBuildsUnitOutlivesTheJailersOwnProcess(t *testing.T) {
 		return
 	}
 	t.Fatalf("the jailer's process exits after it clones Firecracker, and the unit then stops and kills Firecracker: %v", argv)
+}
+
+// Firecracker is init of its PID namespace, so the SIGTERM that systemd sends
+// first on a stop never reaches it, and systemd waits TimeoutStopSec (90 s by
+// default) before SIGKILL. The runner waits 30 seconds for a stop, so the
+// stop must kill at once, as the runner kills an unjailed Firecracker.
+func TestAStopKillsFirecrackerAtOnce(t *testing.T) {
+	f := newFixture(t)
+	f.startOK(testBuild, KindBuild)
+	if props := unitProperties(f.sd.runs[0]); props["KillSignal"] != "SIGKILL" {
+		t.Fatalf("a stop sends SIGTERM first, which Firecracker never receives as its namespace's init: %v", f.sd.runs[0])
+	}
+}
+
+// The runner reaches the guest's exec agent through the vsock socket that
+// Firecracker makes in the jail's run directory. The kernel applies the
+// creator's umask to a new socket, and the directory's default ACL then caps
+// the runner's entry at the socket's group bits. Under systemd's default
+// umask, 0022, that cap is r-x: connecting needs write, so every connection
+// from the runner is refused and the build looks as if its agent never started.
+func TestTheRunnerCanConnectToTheSocketFirecrackerMakes(t *testing.T) {
+	f := newFixture(t)
+	f.startOK(testBuild, KindBuild)
+	umask := unitProperties(f.sd.runs[0])["UMask"]
+	mask, err := strconv.ParseUint(umask, 8, 32)
+	if umask == "" || err != nil || mask&0o070 != 0 {
+		t.Fatalf("the unit's umask %q takes group bits from the socket, and so the runner's write access: %v", umask, f.sd.runs[0])
+	}
 }
 
 // After a unit ends, systemd removes its cgroup, so memory.events is gone.
