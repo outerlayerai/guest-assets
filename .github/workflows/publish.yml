@@ -1,9 +1,9 @@
 name: Publish guest assets
 
-# Builds the guest kernel and helper from source/ on a GitHub-hosted runner
-# and publishes them as the release named by the tag. The build must give
-# the bytes SHA256SUMS names, which are the hashes the outerlayer CLI pins:
-# a build that differs publishes nothing.
+# Builds the guest kernel and helper from source/, and the root helper from
+# host-helper/, on a GitHub-hosted runner and publishes them as the release
+# named by the tag. The build must give the bytes SHA256SUMS names, which are
+# the hashes the outerlayer CLI pins: a build that differs publishes nothing.
 on:
   push:
     tags: ["guest-*"]
@@ -20,13 +20,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build the kernel and the helper
+      - name: Build the kernel and the guest helper
         run: bash source/build.sh out
+
+      # host-helper/build.sh runs the root helper's tests before it builds.
+      - name: Build the root helper
+        run: bash host-helper/build.sh out
 
       - name: Check the build matches the pinned hashes
         run: cd out && sha256sum -c ../SHA256SUMS
 
-      - name: Gather the kernel source and the helper source
+      - name: Gather the kernel source and the helpers' source
         run: |
           url="$(sed -n 's/.*"url": *"\([^"]*\)".*/\1/p' source/kernel/kernel.json)"
           sum="$(sed -n 's/.*"sha256": *"\([^"]*\)".*/\1/p' source/kernel/kernel.json)"
@@ -34,6 +38,7 @@ jobs:
           echo "$sum  out/$(basename "$url")" | sha256sum -c -
           cp source/kernel/config-x86_64 out/config-x86_64
           tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf out/guest-source.tar.gz source
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf out/host-helper-source.tar.gz host-helper
           cp SHA256SUMS out/SHA256SUMS
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -65,6 +70,7 @@ jobs:
           subject-path: |
             out/vmlinux-x86_64
             out/outerlayer-guest-x86_64
+            out/outerlayer-host-helper-x86_64
 
       - name: Publish
         env:
@@ -72,12 +78,12 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           {
-            echo "The guest kernel and helper for OuterLayer microVM builds, built from \`source/\` at this tag by this repository's workflow."
+            echo "The guest kernel and helper for OuterLayer microVM builds, and the root helper that starts them under Firecracker's jailer, built from \`source/\` and \`host-helper/\` at this tag by this repository's workflow."
             echo
             echo '```'
             cat SHA256SUMS
             echo '```'
             echo
-            echo "The release also carries the Linux source tarball and kernel config the kernel was built from, and the helper's source. Verify a file's provenance with \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`."
+            echo "The release also carries the Linux source tarball and kernel config the kernel was built from, and the source of both helpers. Verify a file's provenance with \`gh attestation verify <file> --repo ${GITHUB_REPOSITORY}\`."
           } > notes.md
           gh release create "$TAG" --title "Guest assets ${TAG#guest-}" --notes-file notes.md out/*
