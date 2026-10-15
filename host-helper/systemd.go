@@ -50,9 +50,17 @@ func UnitName(id string) string { return unitPrefix + id }
 // namespace. RemainAfterExit keeps the unit active after that, so systemd does
 // not signal the cgroup (Firecracker is init of its namespace and ignores
 // SIGTERM). The default KillMode still kills every process of the unit on a
-// stop. The unit is not collected when it ends: a unit the kernel killed for
-// want of memory keeps Result=oom-kill until Stop clears it, because systemd
-// removes the cgroup and its memory.events with the unit.
+// stop, and KillSignal=SIGKILL makes that kill the first signal: a SIGTERM
+// never reaches Firecracker, so systemd would otherwise wait out TimeoutStopSec
+// before it kills, and the runner's stop request would time out first. The
+// runner kills an unjailed Firecracker with SIGKILL too. UMask=0007 lets the
+// runner open the vsock socket Firecracker makes in the jail: the kernel
+// applies the creator's umask to a new socket, and the run directory's default
+// ACL then caps the runner's entry at the socket's group bits. Under systemd's
+// default 0022 that cap is r-x, and connecting needs write. The unit is not
+// collected when it ends: a unit the kernel killed for want of memory keeps
+// Result=oom-kill until Stop clears it, because systemd removes the cgroup and
+// its memory.events with the unit.
 func startArgv(cfg Config, id string, uid int, memoryMiB int) []string {
 	unit := UnitName(id)
 	memory := int64(memoryMiB) * 1024 * 1024
@@ -63,6 +71,8 @@ func startArgv(cfg Config, id string, uid int, memoryMiB int) []string {
 		"--quiet",
 		"--property", "Type=exec",
 		"--property", "RemainAfterExit=yes",
+		"--property", "KillSignal=SIGKILL",
+		"--property", "UMask=0007",
 		"--property", "PrivateNetwork=yes",
 		"--property", "MemoryHigh=" + strconv.FormatInt(memory+reclaimHeadroomBytes, 10),
 		"--property", "MemoryMax=" + strconv.FormatInt(memory+killHeadroomBytes, 10),
