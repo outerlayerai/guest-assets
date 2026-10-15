@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func flagValue(argv []string, flag string) string {
@@ -29,6 +30,43 @@ func (f *fixture) startOK(id string, kind string) Reply {
 	reply := f.h.Handle(f.cfg.RunnerUID, Request{V: ProtocolVersion, Op: OpStart, Build: id, Kind: kind})
 	mustOK(f.t, reply)
 	return reply
+}
+
+// Once it starts, the jailer sets the jail's root and run directories to mode
+// 0700. On a directory with an ACL that clears the mask, so the runner's entry
+// no longer lets it reach the vsock socket: every connection is refused with
+// EACCES. Once Firecracker has made the socket, the helper puts that access back.
+func TestStartGivesTheRunnerItsWayBackToTheSocketAfterTheJailerRuns(t *testing.T) {
+	f := newFixture(t)
+	f.startOK(testBuild, KindBuild)
+	paths := f.h.jailPathsFor(testBuild)
+	if len(f.acls) < 2 {
+		t.Fatalf("too few ACLs were set: %v", f.acls)
+	}
+	last := f.acls[len(f.acls)-2:]
+	want := []aclCall{{paths.chroot, f.cfg.RunnerUID, 0o1, false}, {paths.run, f.cfg.RunnerUID, 0o1, false}}
+	for i := range want {
+		if last[i] != want[i] {
+			t.Fatalf("after the unit started, the ACLs set were %v, want %v", last, want)
+		}
+	}
+}
+
+// A Firecracker that never makes its socket ends the start: the unit is
+// stopped and the jail removed, so nothing is left for cleanup to find.
+func TestStartIsRefusedWhenFirecrackerMakesNoSocket(t *testing.T) {
+	f := newFixture(t)
+	f.sd.noSocket = true
+	f.h.vsockWait = 50 * time.Millisecond
+	f.makeBuild(testBuild)
+	reply := f.h.Handle(f.cfg.RunnerUID, Request{V: ProtocolVersion, Op: OpStart, Build: testBuild, Kind: KindBuild})
+	mustRefuseBecause(t, reply, CodeInternal, "no vsock socket")
+	if len(f.sd.stops) != 1 || f.sd.stops[0] != UnitName(testBuild) {
+		t.Fatalf("the unit was not stopped: %v", f.sd.stops)
+	}
+	if _, err := os.Stat(f.h.jailPathsFor(testBuild).dir); !os.IsNotExist(err) {
+		t.Fatalf("the jail is still there: %v", err)
+	}
 }
 
 func TestStartRunsTheBuildInAUnitNamedForIt(t *testing.T) {

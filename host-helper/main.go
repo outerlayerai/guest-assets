@@ -36,6 +36,8 @@ type Ops struct {
 	Fchown func(fd, uid, gid int) error
 	// SetACL gives the runner's account perm on path, as an access or default ACL.
 	SetACL func(path string, runnerUID int, perm uint16, isDefault bool) error
+	// SetACLFD gives the runner's account perm on an open directory, as its access ACL.
+	SetACLFD func(fd int, runnerUID int, perm uint16) error
 	// Fstat reads the owner, type, mode and device of an open file. A test uses it to give a file an owner or a
 	// device the test account cannot create.
 	Fstat func(fd int) (unix.Stat_t, error)
@@ -59,7 +61,13 @@ type Helper struct {
 	mu  sync.Mutex
 	// records are the builds this helper holds, by build id.
 	records map[string]*record
+	// vsockWait is how long a start waits for Firecracker to make its vsock socket.
+	vsockWait time.Duration
 }
+
+// defaultVsockWait bounds a start's wait for the socket. Firecracker makes it within a second of starting, and the
+// runner gives a start 30 seconds.
+const defaultVsockWait = 10 * time.Second
 
 // NewHelper builds a helper from a config. Builds an earlier process of the helper started are read back from the
 // state directory.
@@ -76,10 +84,13 @@ func NewHelper(cfg Config, sys Systemd, ops Ops) (*Helper, error) {
 	if ops.SetACL == nil {
 		ops.SetACL = setACL
 	}
+	if ops.SetACLFD == nil {
+		ops.SetACLFD = setACLFD
+	}
 	if ops.Fstat == nil {
 		ops.Fstat = fstat
 	}
-	h := &Helper{Cfg: cfg, sys: sys, ops: ops, records: map[string]*record{}}
+	h := &Helper{Cfg: cfg, sys: sys, ops: ops, records: map[string]*record{}, vsockWait: defaultVsockWait}
 	if err := os.MkdirAll(h.recordsDir(), 0o700); err != nil {
 		return nil, err
 	}
@@ -229,6 +240,11 @@ func (h *Helper) start(id, kind string) Reply {
 		return refused(refuse(CodeSystemd, "systemd could not start the unit: %v", err))
 	}
 	paths := h.jailPathsFor(id)
+	if err := h.restoreRunnerAccess(paths); err != nil {
+		_ = h.sys.Stop(UnitName(id))
+		_ = h.removeJail(id)
+		return refused(refuse(CodeInternal, "the runner could not be given its way to build %s's vsock socket: %v", id, err))
+	}
 	rec := &record{Build: id, Kind: kind, UID: uid, Unit: UnitName(id), Chroot: paths.chroot}
 	if err := h.saveRecord(rec); err != nil {
 		_ = h.sys.Stop(rec.Unit)

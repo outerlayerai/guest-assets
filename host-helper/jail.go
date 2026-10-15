@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -141,6 +142,41 @@ func (h *Helper) makeJail(id string, uid int, files *buildFiles) error {
 	return h.ops.Fchown(files.disk, uid, uid)
 }
 
+// restoreRunnerAccess gives the runner's account its way back to the build's vsock socket. Once it starts, the jailer
+// sets the jail's root and run directories to mode 0700. On a directory with an ACL, that also clears the mask the
+// runner's entry depends on, so the runner could no longer reach the socket. Firecracker makes the socket only after
+// the jailer is done, so once the socket exists the access is put back. The build's user owns both directories by
+// then, so each is opened without following a link, and its ACL is set through the open file.
+func (h *Helper) restoreRunnerAccess(paths jailPaths) error {
+	root, err := unix.Open(paths.chroot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(root)
+	run, err := unix.Openat(root, filepath.Base(paths.run), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(run)
+	deadline := time.Now().Add(h.vsockWait)
+	for {
+		var st unix.Stat_t
+		if err := unix.Fstatat(run, filepath.Base(vsockPath), &st, unix.AT_SYMLINK_NOFOLLOW); err == nil {
+			break
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("Firecracker made no vsock socket in %s within %s", paths.run, h.vsockWait)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	for _, fd := range []int{root, run} {
+		if err := h.ops.SetACLFD(fd, h.Cfg.RunnerUID, 0o1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func writeNew(path string, data []byte, mode os.FileMode) error {
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, mode)
 	if err != nil {
@@ -243,6 +279,14 @@ func encodeACL(runnerUID int, perm uint16) []byte {
 		out = append(out, entry...)
 	}
 	return out
+}
+
+// setACLFD gives the runner's account perm on the open directory, as its access ACL.
+func setACLFD(fd int, runnerUID int, perm uint16) error {
+	if err := unix.Fsetxattr(fd, "system.posix_acl_access", encodeACL(runnerUID, perm), 0); err != nil {
+		return fmt.Errorf("setting the ACL of an open directory: %w (the file system under the jail must support POSIX ACLs)", err)
+	}
+	return nil
 }
 
 // setACL gives the runner's account perm on the directory, as its access ACL or as the default ACL new files inherit.
