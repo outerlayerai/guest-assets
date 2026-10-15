@@ -41,6 +41,8 @@ type fakeSystemd struct {
 	active map[string]bool
 	oom    map[string]int
 	runErr error
+	// noSocket stands for a Firecracker that never makes its vsock socket.
+	noSocket bool
 }
 
 func (f *fakeSystemd) Run(argv []string) error {
@@ -50,9 +52,33 @@ func (f *fakeSystemd) Run(argv []string) error {
 		return f.runErr
 	}
 	f.runs = append(f.runs, append([]string(nil), argv...))
+	var id, base string
 	for i, arg := range argv {
-		if arg == "--unit" && i+1 < len(argv) {
+		if i+1 >= len(argv) {
+			continue
+		}
+		switch arg {
+		case "--unit":
 			f.active[argv[i+1]] = true
+		case "--id":
+			id = argv[i+1]
+		case "--chroot-base-dir":
+			base = argv[i+1]
+		}
+	}
+	// As the jailer and Firecracker do: the jailer sets the jail's root and run directories to 0700, and Firecracker
+	// then makes its vsock socket in the run directory.
+	if id != "" && base != "" {
+		root := filepath.Join(base, jailDirName, id, "root")
+		for _, dir := range []string{root, filepath.Join(root, "run")} {
+			if err := os.Chmod(dir, 0o700); err != nil {
+				return err
+			}
+		}
+		if !f.noSocket {
+			if err := unix.Mknod(filepath.Join(root, vsockPath), unix.S_IFSOCK|0o770, 0); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -183,6 +209,10 @@ func (f *fixture) rebuild() {
 		},
 		SetACL: func(path string, runnerUID int, perm uint16, isDefault bool) error {
 			f.acls = append(f.acls, aclCall{path, runnerUID, perm, isDefault})
+			return nil
+		},
+		SetACLFD: func(fd int, runnerUID int, perm uint16) error {
+			f.acls = append(f.acls, aclCall{pathOf(fd), runnerUID, perm, false})
 			return nil
 		},
 	}
