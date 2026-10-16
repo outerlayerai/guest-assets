@@ -65,6 +65,42 @@ func linkFromFD(fd int, dest string) error {
 	return unix.Linkat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", fd), unix.AT_FDCWD, dest, unix.AT_SYMLINK_FOLLOW)
 }
 
+// relinkSockets points each socket's link in the jail's run directory at that socket, replacing an existing link in
+// one step, so a connection Firecracker makes meanwhile finds the old socket or the new one. The build's user owns the
+// run directory, so it is opened through the chroot without following a link, and every name is made inside it.
+func relinkSockets(paths jailPaths, sockets []socketFile) error {
+	root, err := unix.Open(paths.chroot, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(root)
+	run, err := unix.Openat(root, filepath.Base(paths.run), unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer unix.Close(run)
+	for _, socket := range sockets {
+		name := fmt.Sprintf("v.sock_%d", socket.port)
+		temp := name + ".new"
+		if err := unix.Unlinkat(run, temp, 0); err != nil && err != unix.ENOENT {
+			return fmt.Errorf("clearing %s: %w", temp, err)
+		}
+		if err := unix.Linkat(unix.AT_FDCWD, fmt.Sprintf("/proc/self/fd/%d", socket.fd), run, temp, unix.AT_SYMLINK_FOLLOW); err != nil {
+			return fmt.Errorf("linking %s into the jail: %w", socket.name, err)
+		}
+		if err := unix.Renameat(run, temp, run, name); err != nil {
+			_ = unix.Unlinkat(run, temp, 0)
+			return fmt.Errorf("linking %s into the jail: %w", socket.name, err)
+		}
+		// A rename between two names of one file does nothing, so a socket the runner did not make again leaves its
+		// second name behind.
+		if err := unix.Unlinkat(run, temp, 0); err != nil && err != unix.ENOENT {
+			return fmt.Errorf("clearing %s: %w", temp, err)
+		}
+	}
+	return nil
+}
+
 func mkdirExact(path string, mode uint32) error {
 	if err := unix.Mkdir(path, mode); err != nil {
 		return err

@@ -5,7 +5,8 @@
 
 // Command outerlayer-host-helper starts each microVM build under Firecracker's
 // jailer for the runner. It runs as root and does one job: start, stop, report
-// and list builds, for the runner's account only. A request names a build id
+// and list builds, and give a running build's jail the runner's sockets again,
+// for the runner's account only. A request names a build id
 // and its kind and time limit; every path and user comes from the root-owned
 // config or from the build's own files, which the helper checks first.
 package main
@@ -139,7 +140,7 @@ func (h *Helper) Handle(peerUID int, req Request) Reply {
 	switch req.Op {
 	case OpList:
 		return h.list()
-	case OpStart, OpStop, OpState:
+	case OpStart, OpStop, OpState, OpRelink:
 		if !buildIDPattern.MatchString(req.Build) {
 			return refused(refuse(CodeBadBuild, "%q is not a build id: twelve lower-case hex digits", req.Build))
 		}
@@ -151,9 +152,49 @@ func (h *Helper) Handle(peerUID int, req Request) Reply {
 		return h.start(req.Build, req.Kind, req.TimeLimitMinutes)
 	case OpStop:
 		return h.stop(req.Build)
+	case OpRelink:
+		return h.relink(req.Build)
 	default:
 		return h.state(req.Build)
 	}
+}
+
+// relink points a running build's jail at the runner's sockets as they are now. The jail holds hard links, which name
+// the sockets the runner had when the build started. A runner that starts again makes its sockets anew, so those links
+// name sockets no process listens on, and the runner cannot write the jail to replace them. The sockets pass the same
+// checks as at start.
+func (h *Helper) relink(id string) Reply {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	rec, held := h.records[id]
+	if !held {
+		return refused(refuse(CodeNotRunning, "build %s is not one this helper started", id))
+	}
+	active, err := h.sys.Active(rec.Unit)
+	if err != nil {
+		return refused(refuse(CodeSystemd, "%v", err))
+	}
+	if !active {
+		return refused(refuse(CodeNotRunning, "the unit of build %s is not running", id))
+	}
+	jailDev, refusal := h.checkJailBase()
+	if refusal != nil {
+		return refused(refusal)
+	}
+	dirfd, refusal := h.openBuildDir(id)
+	if refusal != nil {
+		return refused(refusal)
+	}
+	defer unix.Close(dirfd)
+	sockets, refusal := h.openSockets(id, dirfd, jailDev)
+	if refusal != nil {
+		return refused(refusal)
+	}
+	defer closeSockets(sockets)
+	if err := relinkSockets(h.jailPathsFor(id), sockets); err != nil {
+		return refused(refuse(CodeInternal, "the sockets of build %s could not be linked into its jail again: %v", id, err))
+	}
+	return Reply{Status: "ok", Unit: rec.Unit}
 }
 
 func (h *Helper) list() Reply {

@@ -16,6 +16,9 @@ const (
 	OpStop  = "stop"
 	OpState = "state"
 	OpList  = "list"
+	// OpRelink points a running build's jail at the runner's sockets as they are now, as a runner that starts again
+	// needs. A helper from before this operation refuses it as bad-request.
+	OpRelink = "relink"
 )
 
 // Kinds of microVM a start can name. The kind changes nothing about the
@@ -34,6 +37,7 @@ const (
 	CodeBadFile        = "bad-file"
 	CodeHashMismatch   = "hash-mismatch"
 	CodeAlreadyRunning = "already-running"
+	CodeNotRunning     = "not-running"
 	CodeNoUser         = "no-free-user"
 	CodeSystemd        = "systemd-failed"
 	CodeInternal       = "internal"
