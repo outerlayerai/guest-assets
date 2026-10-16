@@ -6,7 +6,7 @@
 // Command outerlayer-host-helper starts each microVM build under Firecracker's
 // jailer for the runner. It runs as root and does one job: start, stop, report
 // and list builds, for the runner's account only. A request names a build id
-// and nothing else; every path, user and limit comes from the root-owned
+// and its kind and time limit; every path and user comes from the root-owned
 // config or from the build's own files, which the helper checks first.
 package main
 
@@ -148,7 +148,7 @@ func (h *Helper) Handle(peerUID int, req Request) Reply {
 	}
 	switch req.Op {
 	case OpStart:
-		return h.start(req.Build, req.Kind)
+		return h.start(req.Build, req.Kind, req.TimeLimitMinutes)
 	case OpStop:
 		return h.stop(req.Build)
 	default:
@@ -195,12 +195,16 @@ func (h *Helper) freeUID() (int, bool) {
 	return 0, false
 }
 
-func (h *Helper) start(id, kind string) Reply {
+func (h *Helper) start(id, kind string, timeLimitMinutes int) Reply {
 	if kind == "" {
 		kind = KindBuild
 	}
 	if kind != KindBuild && kind != KindCheck {
 		return refused(refuse(CodeBadRequest, "%q is not a kind of build", kind))
+	}
+	// 0 means the request names no limit. A value outside the runner's range is a bug in the caller, so it is refused.
+	if timeLimitMinutes != 0 && (timeLimitMinutes < MinTimeLimitMinutes || timeLimitMinutes > MaxTimeLimitMinutes) {
+		return refused(refuse(CodeBadRequest, "a time limit of %d minutes is not between %d and %d", timeLimitMinutes, MinTimeLimitMinutes, MaxTimeLimitMinutes))
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -235,7 +239,7 @@ func (h *Helper) start(id, kind string) Reply {
 		_ = h.removeJail(id)
 		return refused(refuse(CodeInternal, "the jail of build %s could not be made: %v", id, err))
 	}
-	if err := h.sys.Run(startArgv(h.Cfg, id, uid, files.vm.MemoryMiB)); err != nil {
+	if err := h.sys.Run(startArgv(h.Cfg, id, uid, files.vm.MemoryMiB, timeLimitMinutes)); err != nil {
 		_ = h.removeJail(id)
 		return refused(refuse(CodeSystemd, "systemd could not start the unit: %v", err))
 	}

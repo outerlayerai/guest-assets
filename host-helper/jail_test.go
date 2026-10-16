@@ -189,7 +189,7 @@ func TestStartGivesTheJailOnlyTheBuildsOwnFiles(t *testing.T) {
 			t.Fatalf("%s in the chroot is not the build's own file", name)
 		}
 	}
-	for name, port := range map[string]string{"tunnel.sock": "3128", "gateway.sock": "3126", "claude.sock": "3127", "dest-0.sock": "3129"} {
+	for name, port := range map[string]string{"tunnel.sock": "3128", "gateway.sock": "3126", "claude.sock": "3127", "dest-0.sock": "3129", "lease.sock": "3125"} {
 		a, err := os.Stat(filepath.Join(dir, name))
 		if err != nil {
 			t.Fatal(err)

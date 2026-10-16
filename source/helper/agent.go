@@ -87,7 +87,11 @@ func (a *Agent) handle(c net.Conn) {
 		return
 	}
 	w := &connWriter{c: c}
-	cmd, err := a.buildCommand(&req)
+	if req.Detach != "" {
+		a.handleDetached(c, w, &req)
+		return
+	}
+	cmd, err := a.buildCommand(&req, false)
 	if err != nil {
 		failStart(w, err)
 		return
@@ -266,9 +270,17 @@ func (s *stdinWriter) run() {
 	}
 }
 
-func (a *Agent) buildCommand(req *Request) (*exec.Cmd, error) {
+// errCommandNotFound marks a command the agent cannot find, which a detached
+// request records as exit status 127.
+var errCommandNotFound = errors.New("command not found")
+
+// buildCommand prepares the command for a request. A detached command starts
+// a session of its own, so nothing that happens to the connection's process
+// group reaches it; any other command starts a process group the agent kills
+// when the connection drops.
+func (a *Agent) buildCommand(req *Request, detached bool) (*exec.Cmd, error) {
 	if len(req.Argv) == 0 || req.Argv[0] == "" {
-		return nil, errors.New("empty command")
+		return nil, fmt.Errorf("empty command: %w", errCommandNotFound)
 	}
 	env := make([]string, 0, len(req.Env))
 	searchPath, hasPath := req.Env["PATH"]
@@ -282,7 +294,7 @@ func (a *Agent) buildCommand(req *Request) (*exec.Cmd, error) {
 	if err != nil {
 		return nil, err
 	}
-	attr := &syscall.SysProcAttr{Setpgid: true}
+	attr := &syscall.SysProcAttr{Setpgid: !detached, Setsid: detached}
 	cred, err := a.resolveUser(req.User)
 	if err != nil {
 		return nil, err
@@ -309,7 +321,7 @@ func lookPath(name, pathList string) (string, error) {
 			return p, nil
 		}
 	}
-	return "", fmt.Errorf("%s: command not found", name)
+	return "", fmt.Errorf("%s: %w", name, errCommandNotFound)
 }
 
 // resolveUser maps a user spec (name, uid, or uid:gid) to credentials. Empty

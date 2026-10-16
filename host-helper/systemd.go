@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Systemd is everything the helper asks of systemd, so a test puts a recorder
@@ -37,6 +38,8 @@ const (
 	killHeadroomBytes = 1024 * 1024 * 1024
 	unitPrefix        = "outerlayer-build-"
 	unitSlice         = "system.slice"
+	// cleanupMarginMinutes is added to the runner's time limit. It matches the stop margin of the runner's own service unit.
+	cleanupMarginMinutes = 10
 )
 
 // UnitName is the transient unit that holds one build.
@@ -61,10 +64,25 @@ func UnitName(id string) string { return unitPrefix + id }
 // collected when it ends: a unit the kernel killed for want of memory keeps
 // Result=oom-kill until Stop clears it, because systemd removes the cgroup and
 // its memory.events with the unit.
-func startArgv(cfg Config, id string, uid int, memoryMiB int) []string {
+//
+// With a time limit, the unit gets RuntimeMaxSec of the limit plus
+// cleanupMarginMinutes. The runner ends its own build at the limit; the margin
+// is for its cleanup. systemd applies RuntimeMaxSec only while the unit is
+// running, and the unit is "active (exited)" once the jailer's process has
+// gone. ExitType=cgroup keeps the unit running while Firecracker is in its
+// cgroup, so the limit ends a build that no runner manages. systemd 249 and
+// older reject ExitType, so Run replaces it with a stop timer there.
+func startArgv(cfg Config, id string, uid int, memoryMiB int, timeLimitMinutes int) []string {
 	unit := UnitName(id)
 	memory := int64(memoryMiB) * 1024 * 1024
-	return []string{
+	var limit []string
+	if timeLimitMinutes > 0 {
+		limit = []string{
+			"--property", "ExitType=cgroup",
+			"--property", "RuntimeMaxSec=" + strconv.Itoa((timeLimitMinutes+cleanupMarginMinutes)*60),
+		}
+	}
+	argv := []string{
 		"--unit", unit,
 		"--description", "OuterLayer microVM " + id,
 		"--slice", unitSlice,
@@ -77,6 +95,9 @@ func startArgv(cfg Config, id string, uid int, memoryMiB int) []string {
 		"--property", "MemoryHigh=" + strconv.FormatInt(memory+reclaimHeadroomBytes, 10),
 		"--property", "MemoryMax=" + strconv.FormatInt(memory+killHeadroomBytes, 10),
 		"--property", "MemorySwapMax=0",
+	}
+	argv = append(argv, limit...)
+	return append(argv,
 		cfg.Jailer.Path,
 		"--id", id,
 		"--exec-file", cfg.Firecracker.Path,
@@ -85,16 +106,65 @@ func startArgv(cfg Config, id string, uid int, memoryMiB int) []string {
 		"--chroot-base-dir", cfg.JailBase,
 		"--new-pid-ns",
 		"--cgroup-version", "2",
-		"--parent-cgroup", unitSlice + "/" + unit + ".service",
+		"--parent-cgroup", unitSlice+"/"+unit+".service",
 		"--",
 		"--no-api",
 		"--config-file", "/vm.json",
-	}
+	)
 }
+
+// exitTypeMinVersion is the first systemd that knows the ExitType property.
+const exitTypeMinVersion = 250
 
 type realSystemdRunner struct {
 	systemdRun, systemctl string
 	cgroupRoot            string
+	// version reports the systemd version, or 0 when it cannot be read. It is read once.
+	version     func() int
+	versionOnce sync.Once
+	versionNum  int
+}
+
+var versionLine = regexp.MustCompile(`^systemd (\d+)`)
+
+func (r *realSystemdRunner) systemdVersion() int {
+	r.versionOnce.Do(func() {
+		if r.version != nil {
+			r.versionNum = r.version()
+			return
+		}
+		out, err := output(exec.Command(r.systemctl, "--version"))
+		if err != nil {
+			return
+		}
+		if match := versionLine.FindStringSubmatch(strings.TrimSpace(out)); match != nil {
+			r.versionNum, _ = strconv.Atoi(match[1])
+		}
+	})
+	return r.versionNum
+}
+
+func limitTimerUnit(unit string) string { return unit + "-limit" }
+
+// withoutExitType drops the ExitType property from a systemd-run command line and returns the unit's RuntimeMaxSec
+// in seconds, or 0 when the line has none.
+func withoutExitType(argv []string) ([]string, int) {
+	kept := make([]string, 0, len(argv))
+	seconds := 0
+	for i := 0; i < len(argv); i++ {
+		if argv[i] == "--property" && i+1 < len(argv) {
+			key, value, _ := strings.Cut(argv[i+1], "=")
+			if key == "ExitType" {
+				i++
+				continue
+			}
+			if key == "RuntimeMaxSec" {
+				seconds, _ = strconv.Atoi(value)
+			}
+		}
+		kept = append(kept, argv[i])
+	}
+	return kept, seconds
 }
 
 func findTool(name string) (string, error) {
@@ -131,12 +201,42 @@ func output(cmd *exec.Cmd) (string, error) {
 	return out.String(), nil
 }
 
+// Run starts the unit. A systemd older than exitTypeMinVersion, or one whose version is unknown, gets the unit without
+// ExitType and a companion timer that stops the unit at its RuntimeMaxSec: the unit is "active (exited)" after the
+// jailer's process ends, and systemd does not enforce RuntimeMaxSec in that state.
 func (r *realSystemdRunner) Run(argv []string) error {
-	_, err := output(exec.Command(r.systemdRun, argv...))
-	return err
+	if r.systemdVersion() >= exitTypeMinVersion {
+		_, err := output(exec.Command(r.systemdRun, argv...))
+		return err
+	}
+	plain, seconds := withoutExitType(argv)
+	if _, err := output(exec.Command(r.systemdRun, plain...)); err != nil {
+		return err
+	}
+	if seconds == 0 {
+		return nil
+	}
+	unit := ""
+	for i, arg := range argv {
+		if arg == "--unit" && i+1 < len(argv) {
+			unit = argv[i+1]
+		}
+	}
+	timer := []string{
+		"--unit", limitTimerUnit(unit), "--quiet",
+		"--on-active=" + strconv.Itoa(seconds), "--timer-property=AccuracySec=1s",
+		r.systemctl, "stop", unit + ".service",
+	}
+	if _, err := output(exec.Command(r.systemdRun, timer...)); err != nil {
+		_ = r.Stop(unit)
+		return fmt.Errorf("the time limit timer of %s could not be started: %w", unit, err)
+	}
+	return nil
 }
 
 func (r *realSystemdRunner) Stop(unit string) error {
+	// The companion timer exists only on a systemd without ExitType, and an ended build may have used it up already.
+	_, _ = output(exec.Command(r.systemctl, "stop", limitTimerUnit(unit)+".timer"))
 	if _, err := output(exec.Command(r.systemctl, "stop", unit+".service")); err != nil {
 		// A unit that is not loaded is already stopped.
 		active, activeErr := r.Active(unit)

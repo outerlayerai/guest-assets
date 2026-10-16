@@ -38,12 +38,15 @@ type Frame struct {
 }
 
 // Request is the JSON payload of the first frame on a connection. Field order
-// is the wire key order.
+// is the wire key order. Detach is the absolute path of a directory on the
+// build disk. A request that names one asks for detached mode, and a request
+// that names none is encoded without the key.
 type Request struct {
-	Argv []string          `json:"argv"`
-	User string            `json:"user"`
-	Cwd  string            `json:"cwd"`
-	Env  map[string]string `json:"env"`
+	Argv   []string          `json:"argv"`
+	User   string            `json:"user"`
+	Cwd    string            `json:"cwd"`
+	Env    map[string]string `json:"env"`
+	Detach string            `json:"detach,omitempty"`
 }
 
 // EncodeFrame returns the wire form: type, 4-byte big-endian length, payload.

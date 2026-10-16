@@ -55,6 +55,16 @@ func startAgent(t *testing.T, allow func(net.Conn) bool) (dial func() net.Conn) 
 
 func allowAll(net.Conn) bool { return true }
 
+// sendToRejecter writes a request to an agent that closes a peer it rejects without reading from it. The write can
+// then fail with a broken pipe or a reset, which is the rejection the test expects, not a failure.
+func sendToRejecter(t *testing.T, c net.Conn, argv []string) {
+	t.Helper()
+	b, _ := json.Marshal(Request{Argv: argv, Env: map[string]string{"PATH": "/usr/bin:/bin"}})
+	if err := WriteFrame(c, TypeRequest, b); err != nil && !errors.Is(err, syscall.EPIPE) && !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatal(err)
+	}
+}
+
 func sendRequest(t *testing.T, c net.Conn, argv []string, env map[string]string) {
 	t.Helper()
 	if env == nil {
@@ -261,7 +271,7 @@ func TestAgentLargeOutputIsChunked(t *testing.T) {
 func TestAgentRejectedPeerGetsNoFrames(t *testing.T) {
 	var asked atomic.Int32
 	c := startAgent(t, func(net.Conn) bool { asked.Add(1); return false })()
-	sendRequest(t, c, []string{"/bin/echo", "hi"}, nil)
+	sendToRejecter(t, c, []string{"/bin/echo", "hi"})
 	r := collect(t, c)
 	if r.frames != 0 || asked.Load() != 1 {
 		t.Fatalf("frames=%d asked=%d", r.frames, asked.Load())
@@ -270,7 +280,7 @@ func TestAgentRejectedPeerGetsNoFrames(t *testing.T) {
 
 func TestAgentNilHookRejects(t *testing.T) {
 	c := startAgent(t, nil)()
-	sendRequest(t, c, []string{"/bin/echo", "hi"}, nil)
+	sendToRejecter(t, c, []string{"/bin/echo", "hi"})
 	if r := collect(t, c); r.frames != 0 {
 		t.Fatalf("frames=%d", r.frames)
 	}
@@ -402,4 +412,169 @@ func TestProxyHalfClose(t *testing.T) {
 	if err != nil || string(got) != "PING" {
 		t.Fatalf("got %q, %v", got, err)
 	}
+}
+
+// sendDetached sends a request that asks for detached mode with its files in dir. The request is built as JSON so the
+// test states the wire key, not a Go field name.
+func sendDetached(t *testing.T, c net.Conn, dir string, argv []string) {
+	t.Helper()
+	b, err := json.Marshal(map[string]any{"argv": argv, "user": "", "cwd": "", "env": map[string]string{"PATH": "/usr/bin:/bin"}, "detach": dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFrame(c, TypeRequest, b); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// readOneExit reads frames until the exit frame, and fails when none comes soon or when the agent sends output on
+// the connection: a detached command's output goes to command.log and never to the connection.
+func readOneExit(t *testing.T, c net.Conn) int32 {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	f, err := ReadFrame(c)
+	if err != nil {
+		t.Fatalf("the agent sent no frame for a detached request: %v", err)
+	}
+	if f.Type != TypeExit {
+		t.Fatalf("the first frame has type %d, want the exit frame", f.Type)
+	}
+	status, err := DecodeExit(f.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return status
+}
+
+func waitForFile(t *testing.T, path string) string {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(path); err == nil {
+			return string(b)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("%s never appeared", path)
+	return ""
+}
+
+// AC-1291-01
+func TestDetachedCommandKeepsRunningWhenItsConnectionDrops(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	dir := filepath.Join(t.TempDir(), "run")
+	sendDetached(t, c, dir, []string{"sleep", "30"})
+	if status := readOneExit(t, c); status != 0 {
+		t.Fatalf("the exit frame of a started detached command has status %d, want 0", status)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(waitForFile(t, filepath.Join(dir, "command.pid"))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The kill ends the command and the agent then writes exit-code. Waiting for it keeps that write from racing
+	// the removal of the temporary directory.
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pid, syscall.SIGKILL)
+		waitForFile(t, filepath.Join(dir, "exit-code"))
+	})
+	c.Close()
+	time.Sleep(500 * time.Millisecond)
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("the command ended when its connection dropped: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "exit-code")); err == nil {
+		t.Fatal("exit-code exists for a command that is still running")
+	}
+}
+
+// AC-1291-02
+func TestDetachedCommandLogHoldsStandardOutputAndError(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	dir := filepath.Join(t.TempDir(), "run")
+	sendDetached(t, c, dir, []string{"/bin/sh", "-c", "echo out; echo err >&2"})
+	readOneExit(t, c)
+	waitForFile(t, filepath.Join(dir, "exit-code"))
+	log := waitForFile(t, filepath.Join(dir, "command.log"))
+	if !strings.Contains(log, "out\n") || !strings.Contains(log, "err\n") {
+		t.Fatalf("command.log is %q, want both streams", log)
+	}
+}
+
+// AC-1291-03
+func TestDetachedCommandExitCodeHoldsItsStatus(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	dir := filepath.Join(t.TempDir(), "run")
+	sendDetached(t, c, dir, []string{"/bin/sh", "-c", "exit 7"})
+	readOneExit(t, c)
+	if got := waitForFile(t, filepath.Join(dir, "exit-code")); got != "7\n" {
+		t.Fatalf("exit-code is %q, want %q", got, "7\n")
+	}
+}
+
+// AC-1291-04
+func TestDetachedCommandEndedByASignalRecords128PlusTheSignal(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	dir := filepath.Join(t.TempDir(), "run")
+	sendDetached(t, c, dir, []string{"/bin/sh", "-c", "kill -TERM $$"})
+	readOneExit(t, c)
+	if got := waitForFile(t, filepath.Join(dir, "exit-code")); got != "143\n" {
+		t.Fatalf("exit-code is %q, want %q", got, "143\n")
+	}
+}
+
+// AC-1291-05
+func TestDetachedRequestForACommandThatDoesNotExistRecords127(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	dir := filepath.Join(t.TempDir(), "run")
+	sendDetached(t, c, dir, []string{"definitely-not-a-command"})
+	if status := readOneExit(t, c); status != 0 {
+		t.Fatalf("the exit frame has status %d, want 0: the command's own status is in exit-code", status)
+	}
+	if got := waitForFile(t, filepath.Join(dir, "exit-code")); got != "127\n" {
+		t.Fatalf("exit-code is %q, want %q", got, "127\n")
+	}
+}
+
+func TestDetachedRequestForAFileThatCannotRunRecords126(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	base := t.TempDir()
+	plain := filepath.Join(base, "plain")
+	if err := os.WriteFile(plain, []byte("not a program"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(base, "run")
+	sendDetached(t, c, dir, []string{plain})
+	readOneExit(t, c)
+	if got := waitForFile(t, filepath.Join(dir, "exit-code")); got != "126\n" {
+		t.Fatalf("exit-code is %q, want %q", got, "126\n")
+	}
+}
+
+func TestDetachedFilesAreWrittenWholeThroughARename(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	dir := filepath.Join(t.TempDir(), "run")
+	sendDetached(t, c, dir, []string{"/bin/sh", "-c", "exit 0"})
+	readOneExit(t, c)
+	waitForFile(t, filepath.Join(dir, "exit-code"))
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if strings.Join(names, ",") != "command.log,command.pid,exit-code" {
+		t.Fatalf("the detach directory holds %v, want command.log, command.pid and exit-code", names)
+	}
+}
+
+// AC-1291-06
+func TestCommandWithoutDetachedModeIsKilledWithItsProcessGroupWhenItsConnectionDrops(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	sendRequest(t, c, []string{"/bin/sh", "-c", "sleep 60 & echo $! > " + pidFile + "; wait"}, nil)
+	pid := waitForPid(t, pidFile)
+	c.Close()
+	waitGone(t, pid)
 }
