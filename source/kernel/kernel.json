@@ -1,5 +1,5 @@
 {
-  "version": "6.1.188",
-  "url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.1.188.tar.xz",
-  "sha256": "ed4d0acb1307c235230c89efc094e210e6290593f94a7e617f28b1001101a33a"
+  "version": "6.18.57",
+  "url": "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.18.57.tar.xz",
+  "sha256": "5bd9acdc82ec5efc3790ae840e5aaa40dfde7efff261cf6dde902dc570acf98c"
 }
