@@ -138,12 +138,20 @@ func reapForever() {
 	}
 }
 
+// powerOff ends the microVM and never returns. Firecracker keeps running when
+// an x86 guest powers off, and exits when the guest resets its CPU, so the
+// guest restarts rather than powering off.
 func powerOff() {
-	unix.Sync()
-	_ = unix.Reboot(unix.LINUX_REBOOT_CMD_POWER_OFF)
+	endMicroVM(unix.Sync, unix.Reboot)
 	for {
 		time.Sleep(time.Hour)
 	}
+}
+
+// endMicroVM writes the guest's file systems out, then restarts the guest.
+func endMicroVM(sync func(), reboot func(cmd int) error) {
+	sync()
+	_ = reboot(unix.LINUX_REBOOT_CMD_RESTART)
 }
 
 // startLeaseWatchdog runs the lease watchdog when the kernel command line names
