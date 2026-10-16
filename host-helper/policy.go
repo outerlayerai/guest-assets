@@ -108,9 +108,7 @@ func (b *buildFiles) close() {
 			unix.Close(fd)
 		}
 	}
-	for _, s := range b.sockets {
-		unix.Close(s.fd)
-	}
+	closeSockets(b.sockets)
 }
 
 const resolveFlags = unix.RESOLVE_BENEATH | unix.RESOLVE_NO_SYMLINKS | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_XDEV
@@ -147,6 +145,66 @@ func describeOpenError(name string, err error) *Refusal {
 	return refuse(CodeBadFile, "%s cannot be opened: %v", name, err)
 }
 
+// openBuildDir opens the build's directory below the runner's build directory. Both must be the runner's, and no one
+// else may write them.
+func (h *Helper) openBuildDir(id string) (int, *Refusal) {
+	root, err := unix.Open(h.Cfg.BuildsRoot, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return -1, refuse(CodeOutsideBuilds, "the runner's build directory %s cannot be opened: %v", h.Cfg.BuildsRoot, err)
+	}
+	defer unix.Close(root)
+	rootStat, err := h.ops.Fstat(root)
+	if err != nil || int(rootStat.Uid) != h.Cfg.RunnerUID || rootStat.Mode&0o022 != 0 {
+		return -1, refuse(CodeOutsideBuilds, "the build directory %s is not the runner's, or others can write it", h.Cfg.BuildsRoot)
+	}
+	dirfd, err := openBeneath(root, id, unix.O_RDONLY|unix.O_DIRECTORY)
+	if err != nil {
+		return -1, refuse(CodeOutsideBuilds, "build %s is not a directory inside the runner's build directory: %v", id, err)
+	}
+	dirStat, err := h.ops.Fstat(dirfd)
+	if err != nil || int(dirStat.Uid) != h.Cfg.RunnerUID || dirStat.Mode&0o022 != 0 {
+		unix.Close(dirfd)
+		return -1, refuse(CodeBadFile, "the directory of build %s is not the runner's, or others can write it", id)
+	}
+	return dirfd, nil
+}
+
+// openSockets opens each socket in the build's directory that the guest reaches the runner through. Each must be a
+// socket the runner owns on the jail's file system, so a link to it in the jail can name nothing else the runner holds.
+func (h *Helper) openSockets(id string, dirfd int, jailDev uint64) ([]socketFile, *Refusal) {
+	names, err := listNames(dirfd)
+	if err != nil {
+		return nil, refuse(CodeBadFile, "the directory of build %s cannot be listed: %v", id, err)
+	}
+	var sockets []socketFile
+	fail := func(r *Refusal) ([]socketFile, *Refusal) {
+		closeSockets(sockets)
+		return nil, r
+	}
+	for _, name := range names {
+		port, ok := socketPort(name)
+		if !ok {
+			continue
+		}
+		fd, err := openBeneath(dirfd, name, unix.O_PATH|unix.O_NOFOLLOW)
+		if err != nil {
+			return fail(describeOpenError(name, err))
+		}
+		sockets = append(sockets, socketFile{name: name, port: port, fd: fd})
+		sst, err := h.ops.Fstat(fd)
+		if err != nil || sst.Mode&unix.S_IFMT != unix.S_IFSOCK || int(sst.Uid) != h.Cfg.RunnerUID || uint64(sst.Dev) != jailDev {
+			return fail(refuse(CodeBadFile, "%s is not a socket the runner owns on the jail's file system", name))
+		}
+	}
+	return sockets, nil
+}
+
+func closeSockets(sockets []socketFile) {
+	for _, s := range sockets {
+		unix.Close(s.fd)
+	}
+}
+
 // openBuild opens the build's directory below the runner's build directory, then each fixed file in it. It changes nothing.
 func (h *Helper) openBuild(id string, jailDev uint64) (*buildFiles, *Refusal) {
 	files := &buildFiles{dirfd: -1, kernel: -1, rootfs: -1, disk: -1}
@@ -154,24 +212,11 @@ func (h *Helper) openBuild(id string, jailDev uint64) (*buildFiles, *Refusal) {
 		files.close()
 		return nil, r
 	}
-	root, err := unix.Open(h.Cfg.BuildsRoot, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if err != nil {
-		return fail(refuse(CodeOutsideBuilds, "the runner's build directory %s cannot be opened: %v", h.Cfg.BuildsRoot, err))
-	}
-	defer unix.Close(root)
-	rootStat, err := h.ops.Fstat(root)
-	if err != nil || int(rootStat.Uid) != h.Cfg.RunnerUID || rootStat.Mode&0o022 != 0 {
-		return fail(refuse(CodeOutsideBuilds, "the build directory %s is not the runner's, or others can write it", h.Cfg.BuildsRoot))
-	}
-	dirfd, err := openBeneath(root, id, unix.O_RDONLY|unix.O_DIRECTORY)
-	if err != nil {
-		return fail(refuse(CodeOutsideBuilds, "build %s is not a directory inside the runner's build directory: %v", id, err))
+	dirfd, refusal := h.openBuildDir(id)
+	if refusal != nil {
+		return fail(refusal)
 	}
 	files.dirfd = dirfd
-	dirStat, err := h.ops.Fstat(dirfd)
-	if err != nil || int(dirStat.Uid) != h.Cfg.RunnerUID || dirStat.Mode&0o022 != 0 {
-		return fail(refuse(CodeBadFile, "the directory of build %s is not the runner's, or others can write it", id))
-	}
 
 	// open opens one regular file the runner owns, on the jail's file system.
 	open := func(name string, allowBuildUser bool) (int, unix.Stat_t, *Refusal) {
@@ -201,7 +246,6 @@ func (h *Helper) openBuild(id string, jailDev uint64) (*buildFiles, *Refusal) {
 	}
 
 	var st unix.Stat_t
-	var refusal *Refusal
 	if files.kernel, st, refusal = open(fileKernel, false); refusal != nil {
 		return fail(refusal)
 	}
@@ -235,24 +279,8 @@ func (h *Helper) openBuild(id string, jailDev uint64) (*buildFiles, *Refusal) {
 	}
 	files.vm = settings
 
-	names, err := listNames(dirfd)
-	if err != nil {
-		return fail(refuse(CodeBadFile, "the directory of build %s cannot be listed: %v", id, err))
-	}
-	for _, name := range names {
-		port, ok := socketPort(name)
-		if !ok {
-			continue
-		}
-		fd, err := openBeneath(dirfd, name, unix.O_PATH|unix.O_NOFOLLOW)
-		if err != nil {
-			return fail(describeOpenError(name, err))
-		}
-		files.sockets = append(files.sockets, socketFile{name: name, port: port, fd: fd})
-		sst, err := h.ops.Fstat(fd)
-		if err != nil || sst.Mode&unix.S_IFMT != unix.S_IFSOCK || int(sst.Uid) != h.Cfg.RunnerUID || uint64(sst.Dev) != jailDev {
-			return fail(refuse(CodeBadFile, "%s is not a socket the runner owns on the jail's file system", name))
-		}
+	if files.sockets, refusal = h.openSockets(id, dirfd, jailDev); refusal != nil {
+		return fail(refusal)
 	}
 	return files, nil
 }
