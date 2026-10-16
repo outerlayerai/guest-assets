@@ -34,10 +34,11 @@ func refuse(code, format string, args ...any) *Refusal {
 
 var buildIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
-// The vsock ports the guest's relay reaches, by the socket the runner serves
-// for each. They are the runner's: the relay and tunnel, the gateway, Claude,
-// and one port per destination.
+// The vsock ports the guest reaches, by the socket the runner serves for each.
+// They are the runner's: the relay and tunnel, the gateway, Claude, one port
+// per destination, and the lease stream the guest's watchdog reads.
 const (
+	portLease       = 3125
 	portTunnel      = 3128
 	portGateway     = 3126
 	portClaude      = 3127
@@ -49,6 +50,8 @@ var destinationSocket = regexp.MustCompile(`^dest-(\d{1,3})\.sock$`)
 
 func socketPort(name string) (int, bool) {
 	switch name {
+	case "lease.sock":
+		return portLease, true
 	case "tunnel.sock":
 		return portTunnel, true
 	case "gateway.sock":

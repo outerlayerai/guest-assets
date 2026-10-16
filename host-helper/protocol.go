@@ -39,13 +39,23 @@ const (
 	CodeInternal       = "internal"
 )
 
-// Request is one JSON object on a connection. It names a build id and never a
-// path, a user or a limit: the helper works those out itself.
+// Limits on the time limit a start request names, in minutes. The upper bound
+// is the longest runner.timeLimitMinutes the runner accepts.
+const (
+	MinTimeLimitMinutes = 1
+	MaxTimeLimitMinutes = 1320
+)
+
+// Request is one JSON object on a connection. It names a build id, a kind and
+// the runner's time limit, and never a path or a user: the helper works those
+// out itself. A start request with no time limit gets a unit with no runtime
+// limit.
 type Request struct {
-	V     int    `json:"v"`
-	Op    string `json:"op"`
-	Build string `json:"build,omitempty"`
-	Kind  string `json:"kind,omitempty"`
+	V                int    `json:"v"`
+	Op               string `json:"op"`
+	Build            string `json:"build,omitempty"`
+	Kind             string `json:"kind,omitempty"`
+	TimeLimitMinutes int    `json:"timeLimitMinutes,omitempty"`
 }
 
 // Reply answers one request.

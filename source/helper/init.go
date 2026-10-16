@@ -4,7 +4,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -144,6 +146,39 @@ func powerOff() {
 	}
 }
 
+// startLeaseWatchdog runs the lease watchdog when the kernel command line names
+// a lease port, and reports whether it started one. It runs inside init, so a
+// build's own processes cannot stop it. A guest with no lease port runs no
+// watchdog and never powers itself off.
+func startLeaseWatchdog(ctx context.Context, readCmdline func() ([]byte, error), dialPort func(port uint32) (net.Conn, error), off func()) bool {
+	cmdline, err := readCmdline()
+	if err != nil {
+		return false
+	}
+	port, ok := leasePortFromCmdline(string(cmdline))
+	if !ok {
+		return false
+	}
+	dial := func() (net.Conn, error) {
+		conn, err := dialPort(port)
+		if err != nil {
+			return nil, err
+		}
+		return conn, nil
+	}
+	go runLeaseWatchdog(ctx, dial, off)
+	return true
+}
+
+func startInitLeaseWatchdog() {
+	startLeaseWatchdog(
+		context.Background(),
+		func() ([]byte, error) { return os.ReadFile("/proc/cmdline") },
+		func(port uint32) (net.Conn, error) { return dialVsock(hostCID, port) },
+		powerOff,
+	)
+}
+
 func runInit() int {
 	if os.Getpid() != 1 {
 		fmt.Fprintln(os.Stderr, "init: must run as PID 1")
@@ -155,6 +190,7 @@ func runInit() int {
 	if err := loopbackUp(); err != nil {
 		fmt.Fprintf(os.Stderr, "init: bring up lo: %v\n", err)
 	}
+	startInitLeaseWatchdog()
 	argv := vmInitArgv(os.Getenv)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Env = vmInitEnv()

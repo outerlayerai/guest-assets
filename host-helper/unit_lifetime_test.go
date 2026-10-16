@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -167,5 +168,179 @@ func TestStoppingAUnitClearsItsFailedState(t *testing.T) {
 	}
 	if !strings.Contains(string(calls), "reset-failed "+UnitName(testBuild)+".service") {
 		t.Fatalf("a failed unit stays loaded unless it is reset: %s", calls)
+	}
+}
+
+func (f *fixture) startWithLimit(minutes int) []string {
+	f.t.Helper()
+	f.makeBuild(testBuild)
+	reply := f.h.Handle(f.cfg.RunnerUID, Request{V: ProtocolVersion, Op: OpStart, Build: testBuild, Kind: KindBuild, TimeLimitMinutes: minutes})
+	mustOK(f.t, reply)
+	return f.sd.runs[len(f.sd.runs)-1]
+}
+
+// AC-1291-14
+func TestAStartRequestThatNamesATimeLimitGivesTheUnitThatLimitPlusTenMinutes(t *testing.T) {
+	for _, minutes := range []int{1, 480, 1320} {
+		f := newFixture(t)
+		argv := f.startWithLimit(minutes)
+		want := strconv.Itoa((minutes + 10) * 60)
+		if got := unitProperties(argv)["RuntimeMaxSec"]; got != want {
+			t.Fatalf("a limit of %d minutes gave RuntimeMaxSec=%q, want %q: %v", minutes, got, want, argv)
+		}
+	}
+}
+
+// AC-1291-15
+func TestAStartRequestThatNamesNoTimeLimitGivesTheUnitNoRuntimeLimit(t *testing.T) {
+	f := newFixture(t)
+	argv := f.startWithLimit(0)
+	if got, set := unitProperties(argv)["RuntimeMaxSec"]; set {
+		t.Fatalf("a request with no time limit gave RuntimeMaxSec=%q: %v", got, argv)
+	}
+}
+
+func TestAStartRequestWithATimeLimitOutsideTheRunnersRangeIsRefused(t *testing.T) {
+	for _, minutes := range []int{-1, 1321, 100000} {
+		f := newFixture(t)
+		f.makeBuild(testBuild)
+		reply := f.h.Handle(f.cfg.RunnerUID, Request{V: ProtocolVersion, Op: OpStart, Build: testBuild, Kind: KindBuild, TimeLimitMinutes: minutes})
+		mustRefuse(t, reply, CodeBadRequest)
+		if len(f.sd.runs) != 0 {
+			t.Fatalf("a limit of %d minutes started a unit: %v", minutes, f.sd.runs)
+		}
+	}
+}
+
+func TestATimeLimitIsPassedToTheUnitOfAChecksMicroVMToo(t *testing.T) {
+	f := newFixture(t)
+	f.makeBuild(testBuild)
+	mustOK(t, f.h.Handle(f.cfg.RunnerUID, Request{V: ProtocolVersion, Op: OpStart, Build: testBuild, Kind: KindCheck, TimeLimitMinutes: 30}))
+	if got := unitProperties(f.sd.runs[0])["RuntimeMaxSec"]; got != "2400" {
+		t.Fatalf("RuntimeMaxSec=%q, want 2400", got)
+	}
+}
+
+// systemd applies RuntimeMaxSec only while a unit is running. The jailer's own process exits, so without ExitType=cgroup
+// the unit is "active (exited)" and the limit is never enforced.
+func TestAUnitWithARuntimeLimitStaysRunningWhileFirecrackerIsInItsCgroup(t *testing.T) {
+	f := newFixture(t)
+	props := unitProperties(f.startWithLimit(30))
+	if props["RuntimeMaxSec"] == "" || props["ExitType"] != "cgroup" {
+		t.Fatalf("RuntimeMaxSec=%q ExitType=%q: a runtime limit needs ExitType=cgroup", props["RuntimeMaxSec"], props["ExitType"])
+	}
+}
+
+func TestTheWireKeyOfTheTimeLimitIsTimeLimitMinutes(t *testing.T) {
+	var req Request
+	if err := json.Unmarshal([]byte(`{"v":1,"op":"start","build":"b","timeLimitMinutes":30}`), &req); err != nil {
+		t.Fatal(err)
+	}
+	if req.TimeLimitMinutes != 30 {
+		t.Fatalf("timeLimitMinutes decoded as %d, want 30", req.TimeLimitMinutes)
+	}
+	out, err := json.Marshal(Request{V: 1, Op: OpStart, TimeLimitMinutes: 45})
+	if err != nil || !strings.Contains(string(out), `"timeLimitMinutes":45`) {
+		t.Fatalf("encoded as %s, %v", out, err)
+	}
+}
+
+func TestAStartRequestWithNoTimeLimitAndTheMinimumTimeLimitAreAccepted(t *testing.T) {
+	for _, minutes := range []int{0, MinTimeLimitMinutes} {
+		f := newFixture(t)
+		f.startWithLimit(minutes)
+	}
+}
+
+// Stand-in systemd-run and systemctl that log every call.
+func fakeTools(t *testing.T, version int) (*realSystemdRunner, string) {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	for _, name := range []string{"systemd-run", "systemctl"} {
+		script := "#!/bin/sh\necho \"" + name + " $*\" >> " + log + "\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &realSystemdRunner{
+		systemdRun: filepath.Join(dir, "systemd-run"), systemctl: filepath.Join(dir, "systemctl"),
+		cgroupRoot: filepath.Join(dir, "cgroup"), version: func() int { return version },
+	}
+	return r, log
+}
+
+func readCalls(t *testing.T, log string) string {
+	t.Helper()
+	data, err := os.ReadFile(log)
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestSystemd250AndLaterStartsTheUnitWithExitTypeAndNoTimer(t *testing.T) {
+	r, log := fakeTools(t, 250)
+	f := newFixture(t)
+	if err := r.Run(startArgv(f.cfg, testBuild, 1000, 512, 30)); err != nil {
+		t.Fatal(err)
+	}
+	calls := readCalls(t, log)
+	if !strings.Contains(calls, "ExitType=cgroup") || strings.Contains(calls, "--on-active") {
+		t.Fatalf("a systemd that knows ExitType needs it and no timer: %s", calls)
+	}
+}
+
+func TestSystemd249StartsTheUnitWithoutExitTypeAndAStopTimerAtTheRuntimeLimit(t *testing.T) {
+	for _, version := range []int{249, 0} {
+		r, log := fakeTools(t, version)
+		f := newFixture(t)
+		if err := r.Run(startArgv(f.cfg, testBuild, 1000, 512, 30)); err != nil {
+			t.Fatal(err)
+		}
+		calls := readCalls(t, log)
+		if strings.Contains(calls, "ExitType=") || !strings.Contains(calls, "RuntimeMaxSec=2400") {
+			t.Fatalf("version %d: the unit must keep RuntimeMaxSec and drop ExitType: %s", version, calls)
+		}
+		want := "--unit " + UnitName(testBuild) + "-limit --quiet --on-active=2400 --timer-property=AccuracySec=1s " + r.systemctl + " stop " + UnitName(testBuild) + ".service"
+		if !strings.Contains(calls, want) {
+			t.Fatalf("version %d: no stop timer %q in: %s", version, want, calls)
+		}
+	}
+}
+
+func TestSystemd249StartsNoTimerForAUnitWithNoLimit(t *testing.T) {
+	r, log := fakeTools(t, 249)
+	f := newFixture(t)
+	if err := r.Run(startArgv(f.cfg, testBuild, 1000, 512, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if calls := readCalls(t, log); strings.Contains(calls, "--on-active") {
+		t.Fatalf("a unit with no limit got a timer: %s", calls)
+	}
+}
+
+func TestStoppingABuildStopsItsLimitTimer(t *testing.T) {
+	r, log := fakeTools(t, 249)
+	if err := r.Stop(UnitName(testBuild)); err != nil {
+		t.Fatal(err)
+	}
+	if calls := readCalls(t, log); !strings.Contains(calls, "systemctl stop "+UnitName(testBuild)+"-limit.timer") {
+		t.Fatalf("a build that ends before its limit leaves its timer behind: %s", calls)
+	}
+}
+
+func TestAFailedStopTimerStopsTheUnitAndFailsTheStart(t *testing.T) {
+	r, log := fakeTools(t, 249)
+	script := "#!/bin/sh\necho \"systemd-run $*\" >> " + log + "\ncase \"$*\" in *--on-active*) exit 1 ;; esac\nexit 0\n"
+	if err := os.WriteFile(r.systemdRun, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f := newFixture(t)
+	if err := r.Run(startArgv(f.cfg, testBuild, 1000, 512, 30)); err == nil {
+		t.Fatal("a unit with no way to enforce its limit started")
+	}
+	if calls := readCalls(t, log); !strings.Contains(calls, "systemctl stop "+UnitName(testBuild)+".service") {
+		t.Fatalf("the unit was left running: %s", calls)
 	}
 }

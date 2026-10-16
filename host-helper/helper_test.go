@@ -235,7 +235,7 @@ func (f *fixture) makeBuild(id string) string {
 	writeFile(f.t, filepath.Join(dir, "build.ext4"), "build disk", 0o600)
 	vm := fmt.Sprintf(`{"boot-source":{"kernel_image_path":"/etc/shadow","boot_args":"console=ttyS0 pci=off"},"drives":[{"drive_id":"rootfs","path_on_host":"/etc/passwd","is_root_device":true,"is_read_only":true}],"machine-config":{"vcpu_count":2,"mem_size_mib":2048,"smt":false},"vsock":{"guest_cid":3,"uds_path":"%s/v.sock"}}`, dir)
 	writeFile(f.t, filepath.Join(dir, "vm.json"), vm, 0o600)
-	for _, name := range []string{"tunnel.sock", "gateway.sock", "claude.sock", "dest-0.sock"} {
+	for _, name := range []string{"tunnel.sock", "gateway.sock", "claude.sock", "dest-0.sock", "lease.sock"} {
 		if err := unix.Mknod(filepath.Join(dir, name), unix.S_IFSOCK|0o666, 0); err != nil {
 			f.t.Fatal(err)
 		}
