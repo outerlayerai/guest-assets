@@ -42,6 +42,11 @@ const (
 	cleanupMarginMinutes = 10
 )
 
+// ioWeight is the I/O weight of every build's unit. It is the kernel's default, so each build gets an equal share of a
+// disk that acts on weights, and a build that runs alone is not slowed. Setting the property also turns on the io
+// controller for the unit. No request field changes it.
+const ioWeight = 100
+
 // UnitName is the transient unit that holds one build.
 func UnitName(id string) string { return unitPrefix + id }
 
@@ -95,6 +100,7 @@ func startArgv(cfg Config, id string, uid int, memoryMiB int, timeLimitMinutes i
 		"--property", "MemoryHigh=" + strconv.FormatInt(memory+reclaimHeadroomBytes, 10),
 		"--property", "MemoryMax=" + strconv.FormatInt(memory+killHeadroomBytes, 10),
 		"--property", "MemorySwapMax=0",
+		"--property", "IOWeight=" + strconv.Itoa(ioWeight),
 	}
 	argv = append(argv, limit...)
 	return append(argv,
