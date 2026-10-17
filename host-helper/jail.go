@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -38,6 +39,17 @@ func (h *Helper) jailPathsFor(id string) jailPaths {
 	return jailPaths{top: top, dir: dir, chroot: chroot, run: filepath.Join(chroot, "run")}
 }
 
+// cpuTemplate is the custom CPU template of every microVM, for a build and for its checks. It clears VMX (CPUID leaf
+// 0x1, ECX bit 5) and SVM (leaf 0x80000001, ECX bit 2) and keeps every other bit, so a guest cannot reach the host
+// kernel's nested-virtualization code. Leaf 0x1 has no SVM bit and leaf 0x80000001 has no VMX bit, so one template
+// serves Intel and AMD hosts. It is a constant: no request field changes it.
+var cpuTemplate = map[string]any{
+	"cpuid_modifiers": []any{
+		map[string]any{"leaf": "0x1", "subleaf": "0x0", "flags": 0, "modifiers": []any{map[string]any{"register": "ecx", "bitmap": "0b" + strings.Repeat("x", 26) + "0" + strings.Repeat("x", 5)}}},
+		map[string]any{"leaf": "0x80000001", "subleaf": "0x0", "flags": 0, "modifiers": []any{map[string]any{"register": "ecx", "bitmap": "0b" + strings.Repeat("x", 29) + "0" + strings.Repeat("x", 2)}}},
+	},
+}
+
 // machineConfig is the Firecracker configuration the jailed process reads. Every path in it is a fixed path inside
 // the jail, and only the processor count, the memory and the boot arguments come from the runner.
 func machineConfig(vm vmSettings) ([]byte, error) {
@@ -55,6 +67,7 @@ func machineConfig(vm vmSettings) ([]byte, error) {
 		},
 		"machine-config": map[string]any{"vcpu_count": vm.CPUs, "mem_size_mib": vm.MemoryMiB, "smt": false},
 		"vsock":          map[string]any{"guest_cid": guestCID, "uds_path": vsockPath},
+		"cpu-config":     cpuTemplate,
 	}
 	return json.MarshalIndent(config, "", "  ")
 }

@@ -7,8 +7,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -452,4 +454,58 @@ func TestARestartedBuildKeepsItsDiskAfterStop(t *testing.T) {
 
 func itoa(n int64) string {
 	return strconv.FormatInt(n, 10)
+}
+
+// proves AC-1337-02
+func TestStartWritesACPUTemplateThatClearsVMXAndSVMWhateverTheRequestHolds(t *testing.T) {
+	for _, kind := range []string{KindBuild, KindCheck} {
+		f := newFixture(t)
+		dir := f.makeBuild(testBuild)
+		// A runner that sends its own cpu-config, or a template under another key, changes nothing.
+		vm := `{"machine-config":{"vcpu_count":2,"mem_size_mib":2048,"smt":false},"boot-source":{"boot_args":"pci=off"},` +
+			`"cpu-config":{"cpuid_modifiers":[{"leaf":"0x1","subleaf":"0x0","flags":0,"modifiers":[{"register":"ecx","bitmap":"0b11111111111111111111111111111111"}]}]}}`
+		writeFile(t, filepath.Join(dir, "vm.json"), vm, 0o600)
+		mustOK(t, f.h.Handle(f.cfg.RunnerUID, Request{V: ProtocolVersion, Op: OpStart, Build: testBuild, Kind: kind}))
+		data, err := os.ReadFile(filepath.Join(f.chroot(testBuild), "vm.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg struct {
+			CPU struct {
+				Modifiers []struct {
+					Leaf      string `json:"leaf"`
+					Subleaf   string `json:"subleaf"`
+					Modifiers []struct {
+						Register string `json:"register"`
+						Bitmap   string `json:"bitmap"`
+					} `json:"modifiers"`
+				} `json:"cpuid_modifiers"`
+			} `json:"cpu-config"`
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		var cleared []string
+		for _, entry := range cfg.CPU.Modifiers {
+			for _, m := range entry.Modifiers {
+				digits := strings.TrimPrefix(m.Bitmap, "0b")
+				if len(digits) != 32 {
+					t.Fatalf("%s: bitmap %q is not 32 bits", kind, m.Bitmap)
+				}
+				for i, c := range digits {
+					switch c {
+					case '0':
+						cleared = append(cleared, fmt.Sprintf("%s/%s %s bit %d", entry.Leaf, entry.Subleaf, m.Register, 31-i))
+					case 'x':
+					default:
+						t.Fatalf("%s: bitmap %q sets a bit", kind, m.Bitmap)
+					}
+				}
+			}
+		}
+		sort.Strings(cleared)
+		if strings.Join(cleared, ",") != "0x1/0x0 ecx bit 5,0x80000001/0x0 ecx bit 2" {
+			t.Fatalf("%s: the template clears %v", kind, cleared)
+		}
+	}
 }
