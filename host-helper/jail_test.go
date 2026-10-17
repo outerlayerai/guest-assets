@@ -452,6 +452,27 @@ func TestARestartedBuildKeepsItsDiskAfterStop(t *testing.T) {
 	mustOK(t, f.start(testBuild))
 }
 
+// proves AC-1360-01
+func TestEveryUnitCarriesTheSameIOWeightWhateverTheRequestHolds(t *testing.T) {
+	for _, kind := range []string{KindBuild, KindCheck} {
+		f := newFixture(t)
+		dir := f.makeBuild(testBuild)
+		// A vm.json that names a weight changes nothing: the weight is a constant of the helper.
+		vm := `{"machine-config":{"vcpu_count":2,"mem_size_mib":2048,"smt":false},"boot-source":{"boot_args":"pci=off"},"io_weight":900,"IOWeight":900}`
+		writeFile(t, filepath.Join(dir, "vm.json"), vm, 0o600)
+		mustOK(t, f.h.Handle(f.cfg.RunnerUID, Request{V: ProtocolVersion, Op: OpStart, Build: testBuild, Kind: kind}))
+		var weights []string
+		for i, arg := range f.sd.runs[0] {
+			if strings.HasPrefix(arg, "IOWeight=") && f.sd.runs[0][i-1] == "--property" {
+				weights = append(weights, arg)
+			}
+		}
+		if len(weights) != 1 || weights[0] != "IOWeight=100" {
+			t.Fatalf("%s unit: want exactly one IOWeight=100, got %v in %v", kind, weights, f.sd.runs[0])
+		}
+	}
+}
+
 func itoa(n int64) string {
 	return strconv.FormatInt(n, 10)
 }
