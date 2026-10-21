@@ -36,7 +36,7 @@ jobs:
       - name: Install mmdebstrap and allow user namespaces
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends mmdebstrap uidmap e2fsprogs
+          sudo apt-get install -y --no-install-recommends mmdebstrap uidmap e2fsprogs debian-archive-keyring
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           grep -q "^$(id -un):" /etc/subuid || echo "$(id -un):100000:65536" | sudo tee -a /etc/subuid
           grep -q "^$(id -un):" /etc/subgid || echo "$(id -un):100000:65536" | sudo tee -a /etc/subgid

@@ -49,9 +49,11 @@ fetch "$DEVCONTAINER_CLI_URL" "$DEVCONTAINER_CLI_SHA256" "$work/devcontainer-cli
 
 # The Debian snapshot gives the same packages on every run, and SOURCE_DATE_EPOCH at the snapshot's time makes
 # mmdebstrap's own files reproducible. Unshare mode runs as subordinate ids, so the tree comes out as a tarball, which
-# records root as each file's owner. A directory would hold files owned by the subordinate ids.
+# records root as each file's owner. A directory would hold files owned by the subordinate ids. Debian's signing keys
+# come from the host's debian-archive-keyring package, so apt checks every package it fetches.
 snapshot_epoch="$(date -u -d "$(echo "$DEBIAN_SNAPSHOT" | sed -E 's/^(....)(..)(..)T(..)(..)(..)Z$/\1-\2-\3 \4:\5:\6/')" +%s)"
 SOURCE_DATE_EPOCH="$snapshot_epoch" mmdebstrap --mode=unshare --variant=minbase \
+  --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
   --include=ca-certificates,e2fsprogs,tar,xz-utils,iproute2,iptables,procps,util-linux,git,coreutils,findutils,sed,gawk \
   "$DEBIAN_SUITE" "$work/tree.tar" "http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/"
 
