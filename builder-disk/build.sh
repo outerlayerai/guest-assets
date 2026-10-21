@@ -80,6 +80,10 @@ mkdir "$tree"
 mount -t tmpfs -o size=4g tmpfs "$tree"
 # Device files are left out: a user namespace cannot make them, and the guest helper mounts devtmpfs at /dev.
 tar -xf "$work/tree.tar" -C "$tree" --exclude="./dev/*"
+# mmdebstrap copies the host'"'"'s hostname and resolv.conf into the tree. The builder'"'"'s init sets both at boot, so the
+# disk holds the same values on every host.
+printf "outerlayer-builder\n" > "$tree/etc/hostname"
+printf "# This microVM has no network device. Names are resolved by the runner'"'"'s proxy.\n" > "$tree/etc/resolv.conf"
 install -d "$tree/opt/node" "$tree/opt/outerlayer/bin" "$tree/opt/devcontainers-cli" "$tree/cache" "$tree/work" "$tree/out" "$tree/usr/local/lib/docker/cli-plugins"
 tar -xJf "$work/node.tar.xz" -C "$tree/opt/node" --strip-components=1 --no-same-owner
 tar -xzf "$work/docker.tgz" -C "$work" --no-same-owner
