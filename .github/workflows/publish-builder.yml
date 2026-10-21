@@ -1,0 +1,135 @@
+name: Publish the builder disk
+
+# Builds the builder microVM's root disk from builder-disk/ on a GitHub-hosted
+# runner, twice, and fails unless both builds give the same bytes. A tag
+# builder-<version> also checks the disk against SHA256-builder, the hash the
+# outerlayer CLI pins, and publishes it as the release named by the tag. A
+# build that differs from the pin publishes nothing.
+on:
+  push:
+    tags: ["builder-*"]
+  pull_request:
+    paths:
+      - "builder-disk/**"
+      - "SHA256-builder"
+      - ".github/workflows/publish-builder.yml"
+
+permissions:
+  contents: read
+
+env:
+  # The builder's PID 1 is the published guest helper. Its hash is the one
+  # SHA256SUMS names, so the disk embeds a file this repository already built.
+  GUEST_HELPER_URL: https://github.com/outerlayerai/guest-assets/releases/download/guest-7/outerlayer-guest-x86_64
+
+jobs:
+  build:
+    name: Build twice and compare
+    # Ubuntu 26.04 has e2fsprogs 1.47.1 or later, which the build needs to make the same disk every time.
+    runs-on: ubuntu-26.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # mmdebstrap's unshare mode needs unprivileged user namespaces, which
+      # Ubuntu restricts through AppArmor, and a subordinate id range
+      # for the runner's account.
+      - name: Install mmdebstrap and allow user namespaces
+        run: |
+          mke2fs -V
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mmdebstrap uidmap e2fsprogs debian-archive-keyring
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          grep -q "^$(id -un):" /etc/subuid || echo "$(id -un):100000:65536" | sudo tee -a /etc/subuid
+          grep -q "^$(id -un):" /etc/subgid || echo "$(id -un):100000:65536" | sudo tee -a /etc/subgid
+
+      - name: Fetch the guest helper
+        run: |
+          curl -fsSL -o outerlayer-guest-x86_64 "$GUEST_HELPER_URL"
+          grep ' outerlayer-guest-x86_64$' SHA256SUMS | sha256sum -c -
+
+      - name: Build the disk twice
+        run: |
+          mkdir -p diag
+          BUILDER_DISK_DIAG="$PWD/diag" bash builder-disk/build.sh out-a outerlayer-guest-x86_64
+          bash builder-disk/build.sh out-b outerlayer-guest-x86_64
+          a="$(sha256sum out-a/builder-rootfs-x86_64.ext4 | cut -d' ' -f1)"
+          b="$(sha256sum out-b/builder-rootfs-x86_64.ext4 | cut -d' ' -f1)"
+          echo "first build:  $a"
+          echo "second build: $b"
+          echo "### Builder disk sha256" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$a\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$a" != "$b" ]; then
+            echo "::error::the two builds differ, so the disk is not reproducible"
+            mke2fs -V 2>&1 | head -1
+            diff <(dumpe2fs -h out-a/builder-rootfs-x86_64.ext4 2>/dev/null) <(dumpe2fs -h out-b/builder-rootfs-x86_64.ext4 2>/dev/null) || true
+            for f in /etc/passwd /usr/local/bin/node /opt/outerlayer/builder-init; do
+              diff <(debugfs -R "stat $f" out-a/builder-rootfs-x86_64.ext4 2>/dev/null) <(debugfs -R "stat $f" out-b/builder-rootfs-x86_64.ext4 2>/dev/null) || true
+            done
+            echo "differing bytes: $(cmp -l out-a/builder-rootfs-x86_64.ext4 out-b/builder-rootfs-x86_64.ext4 | wc -l)"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && github.event_name == 'pull_request'
+        with:
+          name: builder-disk-diag-${{ github.run_attempt }}
+          path: diag/
+          if-no-files-found: ignore
+
+      - name: Check the disk against the pinned hash
+        if: startsWith(github.ref, 'refs/tags/builder-')
+        run: cd out-a && sha256sum -c ../SHA256-builder
+
+      - name: Gather the disk and its source
+        if: startsWith(github.ref, 'refs/tags/builder-')
+        run: |
+          mkdir out
+          cp out-a/builder-rootfs-x86_64.ext4 out/
+          tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -czf out/builder-disk-source.tar.gz builder-disk
+          cp SHA256-builder out/SHA256-builder
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: startsWith(github.ref, 'refs/tags/builder-')
+        with:
+          name: builder-disk
+          path: out/
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/builder-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: builder-disk
+          path: out
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: out/builder-rootfs-x86_64.ext4
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          {
+            echo "The root disk of the builder microVM, in which OuterLayer microVM runners build a repository's image, built from \`builder-disk/\` at this tag by this repository's workflow."
+            echo
+            echo '```'
+            cat SHA256-builder
+            echo '```'
+            echo
+            echo "The release also carries the source the disk was built from. Verify the disk's provenance with \`gh attestation verify builder-rootfs-x86_64.ext4 --repo ${GITHUB_REPOSITORY}\`."
+          } > notes.md
+          gh release create "$TAG" --title "Builder disk ${TAG#builder-}" --latest=false --notes-file notes.md out/*
