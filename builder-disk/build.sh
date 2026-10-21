@@ -71,7 +71,7 @@ rm -f "$disk"
 # The tree is unpacked and packed in a user namespace where this account is root and the subordinate ids map to the
 # rest, so every file in the disk keeps the owner the tarball records. The tree is a tmpfs
 # that goes away with the namespace, since this account cannot remove files the subordinate ids own.
-export work here helper disk
+export work here helper disk BUILDER_DISK_DIAG
 unshare --map-auto --map-root-user --mount -- bash -euo pipefail -c '
 tree="$work/tree"
 mkdir "$tree"
@@ -97,6 +97,10 @@ find "$tree" -exec touch -h -d "@0" {} +
 size_kb=$(( $(du -s --apparent-size -k "$tree" | cut -f1) * 5 / 4 + 131072 ))
 truncate -s "${size_kb}K" "$disk"
 SOURCE_DATE_EPOCH=0 mke2fs -q -F -t ext4 -m 0 -U 00000000-0000-0000-0000-000000000000 -E hash_seed=00000000-0000-0000-0000-000000000001 -d "$tree" "$disk"
+if [ -n "${BUILDER_DISK_DIAG:-}" ]; then
+  (cd "$tree" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$BUILDER_DISK_DIAG/contents.txt"
+  tar -tvf "$work/tree.tar" --full-time > "$BUILDER_DISK_DIAG/tarball-list.txt"
+fi
 echo "tree manifest sha256 $(cd "$tree" && find . -printf "%p %m %U %G %s %l\n" | LC_ALL=C sort | sha256sum | cut -d" " -f1)" >&2
 umount "$tree"
 '

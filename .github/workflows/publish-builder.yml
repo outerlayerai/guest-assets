@@ -50,7 +50,8 @@ jobs:
 
       - name: Build the disk twice
         run: |
-          bash builder-disk/build.sh out-a outerlayer-guest-x86_64
+          mkdir -p diag
+          BUILDER_DISK_DIAG="$PWD/diag" bash builder-disk/build.sh out-a outerlayer-guest-x86_64
           bash builder-disk/build.sh out-b outerlayer-guest-x86_64
           a="$(sha256sum out-a/builder-rootfs-x86_64.ext4 | cut -d' ' -f1)"
           b="$(sha256sum out-b/builder-rootfs-x86_64.ext4 | cut -d' ' -f1)"
@@ -68,6 +69,13 @@ jobs:
             echo "differing bytes: $(cmp -l out-a/builder-rootfs-x86_64.ext4 out-b/builder-rootfs-x86_64.ext4 | wc -l)"
             exit 1
           fi
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always() && github.event_name == 'pull_request'
+        with:
+          name: builder-disk-diag-${{ github.run_attempt }}
+          path: diag/
+          if-no-files-found: ignore
 
       - name: Check the disk against the pinned hash
         if: startsWith(github.ref, 'refs/tags/builder-')
