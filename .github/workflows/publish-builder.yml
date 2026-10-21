@@ -58,6 +58,12 @@ jobs:
           echo "\`$a\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "$a" != "$b" ]; then
             echo "::error::the two builds differ, so the disk is not reproducible"
+            mke2fs -V 2>&1 | head -1
+            diff <(dumpe2fs -h out-a/builder-rootfs-x86_64.ext4 2>/dev/null) <(dumpe2fs -h out-b/builder-rootfs-x86_64.ext4 2>/dev/null) || true
+            for f in /etc/passwd /usr/local/bin/node /opt/outerlayer/builder-init; do
+              diff <(debugfs -R "stat $f" out-a/builder-rootfs-x86_64.ext4 2>/dev/null) <(debugfs -R "stat $f" out-b/builder-rootfs-x86_64.ext4 2>/dev/null) || true
+            done
+            echo "differing bytes: $(cmp -l out-a/builder-rootfs-x86_64.ext4 out-b/builder-rootfs-x86_64.ext4 | wc -l)"
             exit 1
           fi
 
