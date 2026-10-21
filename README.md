@@ -69,3 +69,26 @@ gh attestation verify vmlinux-x86_64 --repo outerlayerai/guest-assets
   See `LICENSE`.
 - The kernel is Linux, licensed GPL-2.0. Each release carries the exact
   Linux source tarball and kernel config it was built from.
+
+## The builder disk
+
+A runner with `builtin:vm` hooks builds a repository's image in a builder
+microVM, so no step of the repository's recipe runs on the host. The
+builder microVM boots the guest kernel above with a fourth file as its root
+disk:
+
+- `builder-rootfs-x86_64.ext4`: a Debian file system built from
+  `builder-disk/`. It holds BuildKit, a Docker engine, the devcontainer CLI,
+  Node, the guest helper and the builder's init.
+
+`builder-disk/` is a copy of `packages/cli/builder-disk/` in the OuterLayer
+repository. `builder-disk/pins.env` pins every download by sha256, and the
+Debian packages come from a fixed snapshot, so the same inputs give the same
+disk. `SHA256-builder` holds the hash the CLI pins as `BUILDER_DISK_SHA256`.
+
+Pushing a tag `builder-<version>` runs `.github/workflows/publish-builder.yml`.
+It builds the disk twice and fails unless both builds match each other and
+`SHA256-builder`. Then it publishes a release with the disk, its source and
+`SHA256-builder`, and records a signed build provenance attestation for the
+disk. A pull request that changes `builder-disk/` runs the same two builds
+and shows the disk's hash in the job summary.
