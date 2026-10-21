@@ -25,16 +25,18 @@ env:
 jobs:
   build:
     name: Build twice and compare
-    runs-on: ubuntu-24.04
+    # Ubuntu 26.04 has e2fsprogs 1.47.1 or later, which the build needs to make the same disk every time.
+    runs-on: ubuntu-26.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # mmdebstrap's unshare mode needs unprivileged user namespaces, which
-      # Ubuntu 24.04 restricts through AppArmor, and a subordinate id range
+      # Ubuntu restricts through AppArmor, and a subordinate id range
       # for the runner's account.
       - name: Install mmdebstrap and allow user namespaces
         run: |
+          mke2fs -V
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mmdebstrap uidmap e2fsprogs debian-archive-keyring
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

@@ -34,6 +34,14 @@ for name in NODE DOCKER BUILDX DEVCONTAINER_CLI; do
   fi
 done
 
+# mke2fs before 1.47.1 stamps the current time into the disk and each inode, and picks a random directory hash seed,
+# whatever SOURCE_DATE_EPOCH and -E hash_seed say. Such a disk differs on every build, so it is refused here.
+e2fs_version="$(mke2fs -V 2>&1 | sed -n 's/^mke2fs \([0-9.]*\).*/\1/p')"
+if [ "$(printf '%s\n' "$e2fs_version" 1.47.1 | sort -V | head -1)" != 1.47.1 ]; then
+  echo "mke2fs ${e2fs_version:-of unknown version} cannot make a reproducible disk; use e2fsprogs 1.47.1 or later" >&2
+  exit 1
+fi
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
