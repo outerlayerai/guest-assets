@@ -69,8 +69,8 @@ echo "debian tarball sha256 $(sha256sum "$work/tree.tar" | cut -d" " -f1)" >&2
 disk="$out/builder-rootfs-x86_64.ext4"
 rm -f "$disk"
 # The tree is unpacked and packed in a user namespace where this account is root and the subordinate ids map to the
-# rest, so every file in the disk keeps the owner the tarball records. The tree is removed in the same namespace,
-# since this account cannot remove files the subordinate ids own.
+# rest, so every file in the disk keeps the owner the tarball records. The tree is a tmpfs
+# that goes away with the namespace, since this account cannot remove files the subordinate ids own.
 export work here helper disk
 unshare --map-auto --map-root-user --mount -- bash -euo pipefail -c '
 tree="$work/tree"
