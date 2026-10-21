@@ -66,7 +66,8 @@ export work here helper disk
 unshare --map-auto --map-root-user -- bash -euo pipefail -c '
 tree="$work/tree"
 mkdir "$tree"
-tar -xf "$work/tree.tar" -C "$tree"
+# Device files are left out: a user namespace cannot make them, and the guest helper mounts devtmpfs at /dev.
+tar -xf "$work/tree.tar" -C "$tree" --exclude="./dev/*"
 install -d "$tree/opt/node" "$tree/opt/outerlayer/bin" "$tree/opt/devcontainers-cli" "$tree/cache" "$tree/work" "$tree/out" "$tree/usr/local/lib/docker/cli-plugins"
 tar -xJf "$work/node.tar.xz" -C "$tree/opt/node" --strip-components=1 --no-same-owner
 tar -xzf "$work/docker.tgz" -C "$work" --no-same-owner
