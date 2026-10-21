@@ -64,6 +64,7 @@ SOURCE_DATE_EPOCH="$snapshot_epoch" mmdebstrap --mode=unshare --variant=minbase 
   --keyring=/usr/share/keyrings/debian-archive-keyring.gpg \
   --include=ca-certificates,e2fsprogs,tar,xz-utils,iproute2,iptables,procps,util-linux,git,coreutils,findutils,sed,gawk \
   "$DEBIAN_SUITE" "$work/tree.tar" "http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/"
+echo "debian tarball sha256 $(sha256sum "$work/tree.tar" | cut -d" " -f1)" >&2
 
 disk="$out/builder-rootfs-x86_64.ext4"
 rm -f "$disk"
@@ -71,9 +72,12 @@ rm -f "$disk"
 # rest, so every file in the disk keeps the owner the tarball records. The tree is removed in the same namespace,
 # since this account cannot remove files the subordinate ids own.
 export work here helper disk
-unshare --map-auto --map-root-user -- bash -euo pipefail -c '
+unshare --map-auto --map-root-user --mount -- bash -euo pipefail -c '
 tree="$work/tree"
 mkdir "$tree"
+# A tmpfs lists a directory in the order its entries were made, and mke2fs -d adds files in listing order. A disk
+# file system lists them in hash order, which differs from host to host, so the tree is built in memory.
+mount -t tmpfs -o size=4g tmpfs "$tree"
 # Device files are left out: a user namespace cannot make them, and the guest helper mounts devtmpfs at /dev.
 tar -xf "$work/tree.tar" -C "$tree" --exclude="./dev/*"
 install -d "$tree/opt/node" "$tree/opt/outerlayer/bin" "$tree/opt/devcontainers-cli" "$tree/cache" "$tree/work" "$tree/out" "$tree/usr/local/lib/docker/cli-plugins"
@@ -93,6 +97,7 @@ find "$tree" -exec touch -h -d "@0" {} +
 size_kb=$(( $(du -s --apparent-size -k "$tree" | cut -f1) * 5 / 4 + 131072 ))
 truncate -s "${size_kb}K" "$disk"
 SOURCE_DATE_EPOCH=0 mke2fs -q -F -t ext4 -m 0 -U 00000000-0000-0000-0000-000000000000 -E hash_seed=00000000-0000-0000-0000-000000000001 -d "$tree" "$disk"
-rm -rf "$tree"
+echo "tree manifest sha256 $(cd "$tree" && find . -printf "%p %m %U %G %s %l\n" | LC_ALL=C sort | sha256sum | cut -d" " -f1)" >&2
+umount "$tree"
 '
 echo "builder-rootfs-x86_64.ext4 sha256 $(sha256sum "$disk" | cut -d' ' -f1)"
