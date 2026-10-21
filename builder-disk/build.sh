@@ -87,12 +87,12 @@ ln -s /opt/devcontainers-cli/devcontainer.js "$tree/usr/local/bin/devcontainer"
 install -m 0755 "$helper" "$tree/opt/outerlayer/bin/outerlayer-guest"
 install -m 0755 "$here/init.sh" "$tree/opt/outerlayer/builder-init"
 
-# Fixed times, and a size from file sizes rather than the host file system blocks, so the same inputs give the same
-# bytes on any host.
+# Fixed times, a fixed directory hash seed, and a size from file sizes rather than the host file system blocks, so the same inputs give the same
+# bytes on any host. The seed is not all zeros: mke2fs reads an all-zero seed as unset and picks a random one.
 find "$tree" -exec touch -h -d "@0" {} +
 size_kb=$(( $(du -s --apparent-size -k "$tree" | cut -f1) * 5 / 4 + 131072 ))
 truncate -s "${size_kb}K" "$disk"
-SOURCE_DATE_EPOCH=0 mke2fs -q -F -t ext4 -m 0 -U 00000000-0000-0000-0000-000000000000 -E hash_seed=00000000-0000-0000-0000-000000000000 -d "$tree" "$disk"
+SOURCE_DATE_EPOCH=0 mke2fs -q -F -t ext4 -m 0 -U 00000000-0000-0000-0000-000000000000 -E hash_seed=00000000-0000-0000-0000-000000000001 -d "$tree" "$disk"
 rm -rf "$tree"
 '
 echo "builder-rootfs-x86_64.ext4 sha256 $(sha256sum "$disk" | cut -d' ' -f1)"
