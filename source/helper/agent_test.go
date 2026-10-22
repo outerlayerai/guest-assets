@@ -101,6 +101,8 @@ func collect(t *testing.T, c net.Conn) result {
 				t.Fatal(err)
 			}
 			r.exit, r.gotExit = code, true
+			// The agent keeps the connection open after the exit frame until the input is over.
+			return r
 		default:
 			t.Fatalf("unexpected frame type %d", f.Type)
 		}
@@ -577,4 +579,78 @@ func TestCommandWithoutDetachedModeIsKilledWithItsProcessGroupWhenItsConnectionD
 	pid := waitForPid(t, pidFile)
 	c.Close()
 	waitGone(t, pid)
+}
+
+// readExit reads frames until the exit frame and returns its status.
+func readExit(t *testing.T, c net.Conn) int32 {
+	t.Helper()
+	c.SetReadDeadline(time.Now().Add(20 * time.Second))
+	for {
+		f, err := ReadFrame(c)
+		if err != nil {
+			t.Fatalf("read before the exit frame: %v", err)
+		}
+		if f.Type == TypeExit {
+			code, err := DecodeExit(f.Payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return code
+		}
+	}
+}
+
+// closedWithin reports whether the agent closes the connection within d, reading and discarding anything it sends.
+func closedWithin(c net.Conn, d time.Duration) bool {
+	c.SetReadDeadline(time.Now().Add(d))
+	_, err := io.Copy(io.Discard, c)
+	var ne net.Error
+	return err == nil || !(errors.As(err, &ne) && ne.Timeout())
+}
+
+// The unit seam for AC-1550-01 and AC-1550-03, run from guest-helper-go.integration.test.ts.
+func TestAgentKeepsTheConnectionOpenUntilTheInputIsOver(t *testing.T) {
+	c := startAgent(t, allowAll)()
+	sendRequest(t, c, []string{"head", "-c", "1"}, nil)
+	if err := WriteFrame(c, TypeStdin, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if code := readExit(t, c); code != 0 {
+		t.Fatalf("exit status %d, want 0", code)
+	}
+	// The command has exited. The host's later input still arrives, and every write succeeds.
+	chunk := bytes.Repeat([]byte("y"), MaxChunk)
+	for i := 0; i < 64; i++ {
+		if err := WriteFrame(c, TypeStdin, chunk); err != nil {
+			t.Fatalf("write %d after the exit frame: %v", i, err)
+		}
+	}
+	if closedWithin(c, 300*time.Millisecond) {
+		t.Fatal("the agent closed the connection before the end-of-input frame")
+	}
+	if err := WriteFrame(c, TypeStdin, nil); err != nil {
+		t.Fatalf("write the end-of-input frame: %v", err)
+	}
+	if !closedWithin(c, 2*time.Second) {
+		t.Fatal("the agent kept the connection open after the end-of-input frame")
+	}
+}
+
+// The unit seam for AC-1550-04, run from guest-helper-go.integration.test.ts.
+func TestAgentClosesTheConnectionWhenTheInputNeverEnds(t *testing.T) {
+	saved := inputEndTimeout
+	inputEndTimeout = 400 * time.Millisecond
+	t.Cleanup(func() { inputEndTimeout = saved })
+	c := startAgent(t, allowAll)()
+	sendRequest(t, c, []string{"true"}, nil)
+	if code := readExit(t, c); code != 0 {
+		t.Fatalf("exit status %d, want 0", code)
+	}
+	start := time.Now()
+	if !closedWithin(c, 5*time.Second) {
+		t.Fatal("the agent kept the connection open past its time limit")
+	}
+	if waited := time.Since(start); waited < 250*time.Millisecond {
+		t.Fatalf("the agent closed the connection after %v, before its time limit", waited)
+	}
 }
