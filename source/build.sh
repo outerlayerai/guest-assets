@@ -3,7 +3,7 @@
 # Copyright 2026 Magu Studios, Inc.
 #
 # Builds the guest artefacts reproducibly:
-#   outerlayer-guest-x86_64  static guest helper (init, exec agent, relay)
+#   outerlayer-guest-x86_64  static guest helper (init, exec agent, relay, network stack)
 #   vmlinux-x86_64           Firecracker guest kernel
 #
 # Usage: packages/cli/guest/build.sh <out-dir>
@@ -21,8 +21,14 @@ KERNEL_IMAGE="gcc:12.2.0@sha256:a3e091325c0af43bc9c1c576ddd155351d5b164381244211
 # every run, so the kernel's bytes do not drift with the mirror.
 DEBIAN_SNAPSHOT="20260701T000000Z"
 
+# Prints the Go image the helper is built and tested in, for a test run that has no Go of its own.
+if [ "${1:-}" = "--print-go-image" ]; then
+  echo "$GO_IMAGE"
+  exit 0
+fi
+
 if [ "$#" -ne 1 ]; then
-  echo "usage: $0 <out-dir>" >&2
+  echo "usage: $0 <out-dir> | --print-go-image" >&2
   exit 2
 fi
 
@@ -44,7 +50,7 @@ fi
 # Helper: unit tests first, then a static build with no build id or VCS stamp.
 docker run --rm \
   --user "$(id -u):$(id -g)" \
-  -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-mod=readonly \
+  -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-mod=readonly -e GOTOOLCHAIN=local \
   -e CGO_ENABLED=0 -e GOOS=linux -e GOARCH=amd64 \
   -v "$here/helper:/src:ro" -v "$out:/out" -w /src \
   "$GO_IMAGE" \

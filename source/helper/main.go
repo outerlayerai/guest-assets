@@ -12,7 +12,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-const version = "outerlayer-guest 1"
+const version = "outerlayer-guest 2"
 
 func main() {
 	args := os.Args[1:]
@@ -30,6 +30,8 @@ func main() {
 		os.Exit(runMount(args[1:]))
 	case "relay":
 		os.Exit(runRelay(args[1:]))
+	case "net":
+		os.Exit(runNet(args[1:]))
 	case "exec-agent":
 		os.Exit(runExecAgent(args[1:]))
 	case "version":
@@ -41,7 +43,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: outerlayer-guest init|mount|relay|exec-agent|version")
+	fmt.Fprintln(os.Stderr, "usage: outerlayer-guest init|mount|relay|net|exec-agent|version")
 }
 
 // mountOptionFlags are the generic options mapped to mount flags; anything
