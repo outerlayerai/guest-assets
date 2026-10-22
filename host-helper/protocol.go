@@ -19,6 +19,9 @@ const (
 	// OpRelink points a running build's jail at the runner's sockets as they are now, as a runner that starts again
 	// needs. A helper from before this operation refuses it as bad-request.
 	OpRelink = "relink"
+	// OpDiscard gives the free blocks of a stopped builder microVM's cache disk back to the host. A helper from before
+	// this operation refuses it as bad-request.
+	OpDiscard = "discard"
 )
 
 // Kinds of microVM a start can name. The kind changes nothing about the
@@ -75,4 +78,5 @@ type Reply struct {
 	Active      *bool    `json:"active,omitempty"`
 	OOMKills    *int     `json:"oomKills,omitempty"`
 	Builds      []string `json:"builds,omitempty"`
+	FreedBytes  *int64   `json:"freedBytes,omitempty"`
 }

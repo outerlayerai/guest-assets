@@ -458,3 +458,99 @@ func TestLoadConfigRefusesAFileThatIsALink(t *testing.T) {
 		t.Fatal("a config that is a link was accepted")
 	}
 }
+
+func TestDiscardRefusesADiskThatIsALinkToAFileInsideTheBuild(t *testing.T) {
+	f := newFixture(t)
+	dir := f.makeBuild(testBuild)
+	if err := os.Remove(filepath.Join(dir, "build.ext4")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("vm.json", filepath.Join(dir, "build.ext4")); err != nil {
+		t.Fatal(err)
+	}
+
+	mustRefuseBecause(t, f.discard(testBuild), CodeBadFile, "symbolic link")
+	if len(f.e2fsckRuns) != 0 || len(f.chowns) != 0 {
+		t.Fatal("the helper acted on a link")
+	}
+}
+
+func TestDiscardRefusesABuildOutsideTheRunnersBuildsRoot(t *testing.T) {
+	for _, mode := range []os.FileMode{0o775, 0o757} {
+		f := newFixture(t)
+		f.makeBuild(testBuild)
+		if err := os.Chmod(f.builds, mode); err != nil {
+			t.Fatal(err)
+		}
+
+		mustRefuseBecause(t, f.discard(testBuild), CodeOutsideBuilds, "others can write it")
+		if len(f.e2fsckRuns) != 0 {
+			t.Fatalf("e2fsck ran with a builds root of mode %o", mode)
+		}
+	}
+}
+
+func TestDiscardRefusesABuildDirectoryThatIsALink(t *testing.T) {
+	f := newFixture(t)
+	other := t.TempDir()
+	writeFile(t, filepath.Join(other, "build.ext4"), "x", 0o600)
+	if err := os.Symlink(other, filepath.Join(f.builds, testBuild)); err != nil {
+		t.Fatal(err)
+	}
+
+	mustRefuse(t, f.discard(testBuild), CodeOutsideBuilds)
+	if len(f.e2fsckRuns) != 0 {
+		t.Fatal("e2fsck ran through a linked build directory")
+	}
+}
+
+func TestDiscardRefusesADiskThatIsNotARegularFile(t *testing.T) {
+	f := newFixture(t)
+	f.makeBuild(testBuild)
+	f.editFile("build.ext4", func(st *unix.Stat_t) { st.Mode = st.Mode&^unix.S_IFMT | unix.S_IFBLK })
+
+	mustRefuseBecause(t, f.discard(testBuild), CodeBadFile, "not a regular file")
+	if len(f.e2fsckRuns) != 0 {
+		t.Fatal("e2fsck ran on a device")
+	}
+}
+
+func TestDiscardRefusesADiskAnotherAccountOwns(t *testing.T) {
+	f := newFixture(t)
+	f.makeBuild(testBuild)
+	f.editFile("build.ext4", func(st *unix.Stat_t) { st.Uid = uint32(f.cfg.RunnerUID + 7) })
+
+	mustRefuseBecause(t, f.discard(testBuild), CodeBadFile, "not owned by the runner's account or a build user")
+	if len(f.e2fsckRuns) != 0 || len(f.chowns) != 0 {
+		t.Fatal("the helper acted on a file another account owns")
+	}
+}
+
+func TestDiscardRefusesADiskWithMoreThanOneName(t *testing.T) {
+	f := newFixture(t)
+	f.makeBuild(testBuild)
+	f.editFile("build.ext4", func(st *unix.Stat_t) { st.Nlink = 2 })
+
+	mustRefuseBecause(t, f.discard(testBuild), CodeBadFile, "2 names")
+	if len(f.e2fsckRuns) != 0 || len(f.chowns) != 0 {
+		t.Fatal("the helper acted on a file with two names")
+	}
+}
+
+func TestDiscardRefusesADiskOnAnotherFileSystemThanTheBuildDirectory(t *testing.T) {
+	f := newFixture(t)
+	f.makeBuild(testBuild)
+	f.editFile("build.ext4", func(st *unix.Stat_t) { st.Dev++ })
+
+	mustRefuseBecause(t, f.discard(testBuild), CodeBadFile, "same file system")
+}
+
+func TestDiscardRefusesABuildWithNoDisk(t *testing.T) {
+	f := newFixture(t)
+	dir := f.makeBuild(testBuild)
+	if err := os.Remove(filepath.Join(dir, "build.ext4")); err != nil {
+		t.Fatal(err)
+	}
+
+	mustRefuseBecause(t, f.discard(testBuild), CodeBadFile, "does not exist")
+}

@@ -15,11 +15,17 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
 
 const testBuild = "0123456789ab"
+
+type e2fsckRun struct {
+	path     string
+	uid, gid int
+}
 
 type chownCall struct {
 	path     string
@@ -117,6 +123,10 @@ type fixture struct {
 	// fstatEdit, when set, changes what the helper reads about an open file, by the file's path. A test uses it for an
 	// owner or a device that an unprivileged test account cannot make.
 	fstatEdit func(path string, st *unix.Stat_t)
+	// e2fsck answers a discard instead of the real program. Absent, it exits 0 and changes nothing.
+	e2fsck func(fd, uid, gid int, limit time.Duration) (int, string, error)
+	// e2fsckRuns records each discard's account and the path of the file it was given.
+	e2fsckRuns []e2fsckRun
 	// trustRoot replaces the directory the jail base's ancestry check starts below.
 	trustRoot string
 	// trustedUIDDelta is added to the user that root-owned files must belong to.
@@ -206,6 +216,13 @@ func (f *fixture) rebuild() {
 				f.fstatEdit(pathOf(fd), &st)
 			}
 			return st, err
+		},
+		RunE2fsck: func(fd, uid, gid int, limit time.Duration) (int, string, error) {
+			f.e2fsckRuns = append(f.e2fsckRuns, e2fsckRun{pathOf(fd), uid, gid})
+			if f.e2fsck != nil {
+				return f.e2fsck(fd, uid, gid, limit)
+			}
+			return 0, "", nil
 		},
 		SetACL: func(path string, runnerUID int, perm uint16, isDefault bool) error {
 			f.acls = append(f.acls, aclCall{path, runnerUID, perm, isDefault})

@@ -5,8 +5,8 @@
 
 // Command outerlayer-host-helper starts each microVM build under Firecracker's
 // jailer for the runner. It runs as root and does one job: start, stop, report
-// and list builds, and give a running build's jail the runner's sockets again,
-// for the runner's account only. A request names a build id
+// and list builds, give a running build's jail the runner's sockets again, and
+// give a stopped builder's cache disk space back, for the runner's account only. A request names a build id
 // and its kind and time limit; every path and user comes from the root-owned
 // config or from the build's own files, which the helper checks first.
 package main
@@ -39,6 +39,9 @@ type Ops struct {
 	SetACL func(path string, runnerUID int, perm uint16, isDefault bool) error
 	// SetACLFD gives the runner's account perm on an open directory, as its access ACL.
 	SetACLFD func(fd int, runnerUID int, perm uint16) error
+	// RunE2fsck runs e2fsck to discard the free blocks of the open file as the given account, and returns its exit status
+	// and the start of its error output. A test replaces it, so no test runs a program.
+	RunE2fsck func(fd, uid, gid int, limit time.Duration) (int, string, error)
 	// Fstat reads the owner, type, mode and device of an open file. A test uses it to give a file an owner or a
 	// device the test account cannot create.
 	Fstat func(fd int) (unix.Stat_t, error)
@@ -62,6 +65,8 @@ type Helper struct {
 	mu  sync.Mutex
 	// records are the builds this helper holds, by build id.
 	records map[string]*record
+	// discarding holds the builds whose disk an e2fsck is checking. A start of such a build is refused.
+	discarding map[string]bool
 	// vsockWait is how long a start waits for Firecracker to make its vsock socket.
 	vsockWait time.Duration
 }
@@ -91,7 +96,10 @@ func NewHelper(cfg Config, sys Systemd, ops Ops) (*Helper, error) {
 	if ops.Fstat == nil {
 		ops.Fstat = fstat
 	}
-	h := &Helper{Cfg: cfg, sys: sys, ops: ops, records: map[string]*record{}, vsockWait: defaultVsockWait}
+	if ops.RunE2fsck == nil {
+		ops.RunE2fsck = runE2fsck
+	}
+	h := &Helper{Cfg: cfg, sys: sys, ops: ops, records: map[string]*record{}, discarding: map[string]bool{}, vsockWait: defaultVsockWait}
 	if err := os.MkdirAll(h.recordsDir(), 0o700); err != nil {
 		return nil, err
 	}
@@ -140,7 +148,7 @@ func (h *Helper) Handle(peerUID int, req Request) Reply {
 	switch req.Op {
 	case OpList:
 		return h.list()
-	case OpStart, OpStop, OpState, OpRelink:
+	case OpStart, OpStop, OpState, OpRelink, OpDiscard:
 		if !buildIDPattern.MatchString(req.Build) {
 			return refused(refuse(CodeBadBuild, "%q is not a build id: twelve lower-case hex digits", req.Build))
 		}
@@ -154,6 +162,8 @@ func (h *Helper) Handle(peerUID int, req Request) Reply {
 		return h.stop(req.Build)
 	case OpRelink:
 		return h.relink(req.Build)
+	case OpDiscard:
+		return h.discard(req.Build)
 	default:
 		return h.state(req.Build)
 	}
@@ -252,6 +262,9 @@ func (h *Helper) start(id, kind string, timeLimitMinutes int) Reply {
 	if _, held := h.records[id]; held {
 		return refused(refuse(CodeAlreadyRunning, "build %s is already running", id))
 	}
+	if h.discarding[id] {
+		return refused(refuse(CodeAlreadyRunning, "the disk of build %s is being checked", id))
+	}
 	jailDev, refusal := h.checkJailBase()
 	if refusal != nil {
 		return refused(refusal)
@@ -319,6 +332,8 @@ const (
 	// maxRequest bounds what the helper reads from a caller before it decides whether to answer.
 	maxRequest   = 4096
 	connDeadline = 30 * time.Second
+	// discardDeadline lets a connection outlast the e2fsck that a discard request runs.
+	discardDeadline = discardTimeout + time.Minute
 )
 
 func peerUID(conn *net.UnixConn) (int, error) {
@@ -355,6 +370,9 @@ func (h *Helper) ServeConn(conn *net.UnixConn) {
 		case json.Unmarshal(line, &req) != nil:
 			reply = refused(refuse(CodeBadRequest, "the request is not one JSON object on a line"))
 		default:
+			if req.Op == OpDiscard {
+				_ = conn.SetDeadline(time.Now().Add(discardDeadline))
+			}
 			reply = h.Handle(peer, req)
 		}
 	}
