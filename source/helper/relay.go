@@ -241,14 +241,26 @@ func relayAccept(l net.Listener, dial func() (net.Conn, error), port uint16) {
 
 type closeWriter interface{ CloseWrite() error }
 
+// aborter is a connection that can end with a reset instead of a clean end.
+type aborter interface{ Abort() }
+
 // proxy copies both directions and half-closes the write side of the
-// destination when a source reaches EOF. Both connections close once both
-// directions finish.
+// destination when a source reaches EOF. A copy that fails for any other
+// reason ends the destination with a reset when it can, so the program never
+// reads a failure as a clean end of the stream. Both connections close once
+// both directions finish.
 func proxy(a, b net.Conn) {
 	var wg sync.WaitGroup
 	copyDir := func(dst, src net.Conn) {
 		defer wg.Done()
-		_, _ = io.Copy(dst, src)
+		if _, err := io.Copy(dst, src); err != nil {
+			if ab, ok := dst.(aborter); ok {
+				ab.Abort()
+			} else {
+				_ = dst.Close()
+			}
+			return
+		}
 		if cw, ok := dst.(closeWriter); ok {
 			_ = cw.CloseWrite()
 		} else {
