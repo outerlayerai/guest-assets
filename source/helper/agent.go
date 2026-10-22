@@ -26,6 +26,10 @@ const defaultPath = "/opt/outerlayer/bin:/usr/local/sbin:/usr/local/bin:/usr/sbi
 // process group are gone. A process that escaped the group can hold a pipe open.
 const drainTimeout = 5 * time.Second
 
+// inputEndTimeout bounds how long the connection stays open after the exit
+// frame while the host has not said its input is over.
+var inputEndTimeout = 5 * time.Second
+
 // Agent runs commands for the host over a stream listener.
 type Agent struct {
 	// PeerAllowed decides whether a connection may speak the protocol. A nil
@@ -130,18 +134,24 @@ func (a *Agent) handle(c net.Conn) {
 	killGroup := func() {
 		killed.Do(func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
 	}
+	// inputOver closes when the host's end-of-input frame arrives or the connection fails.
+	inputOver := make(chan struct{})
+	var endInput sync.Once
+	markInputOver := func() { endInput.Do(func() { close(inputOver) }) }
 	go func() {
 		for {
 			f, err := ReadFrame(c)
 			if err != nil {
 				stdin.close()
 				killGroup()
+				markInputOver()
 				return
 			}
 			switch f.Type {
 			case TypeStdin:
 				if len(f.Payload) == 0 {
 					stdin.close()
+					markInputOver()
 				} else {
 					stdin.push(f.Payload)
 				}
@@ -150,6 +160,7 @@ func (a *Agent) handle(c net.Conn) {
 			default:
 				stdin.close()
 				killGroup()
+				markInputOver()
 				return
 			}
 		}
@@ -178,6 +189,13 @@ func (a *Agent) handle(c net.Conn) {
 	stdin.close()
 
 	_ = w.send(TypeExit, EncodeExit(exitStatus(cmd.ProcessState)))
+	// Firecracker drops a connection's unread host bytes when the guest closes it, and the host's next write then
+	// fails, which can lose the exit frame. So the connection stays open, its input read and discarded, until the host
+	// says its input is over or closes the connection, or the time limit passes.
+	select {
+	case <-inputOver:
+	case <-time.After(inputEndTimeout):
+	}
 }
 
 func failStart(w *connWriter, err error) {
