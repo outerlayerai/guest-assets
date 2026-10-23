@@ -53,8 +53,10 @@ func (c *closeCounter) Close() error { c.n.Add(1); return c.Conn.Close() }
 func newRig(t *testing.T) *rig {
 	t.Helper()
 	r := &rig{t: t, names: newNameMap(nil, 0), tunnel: make(chan net.Conn, 16), near: make(chan net.Conn, 16)}
-	serverEP := channel.New(256, 1500, "")
-	clientEP := channel.New(256, 1500, "")
+	// A full queue drops a packet. A test opens up to maxInFlightDials connections at once, and a SYN dropped on its
+	// retries too can miss the dial's five-second timeout, so each queue holds several times that many packets.
+	serverEP := channel.New(4*maxInFlightDials, 1500, "")
+	clientEP := channel.New(4*maxInFlightDials, 1500, "")
 	ns, err := newNetStack(serverEP, r.names, func() (net.Conn, error) {
 		r.dials.Add(1)
 		near, far := net.Pipe()

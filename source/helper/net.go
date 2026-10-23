@@ -34,13 +34,7 @@ const (
 )
 
 // dialTunnel opens a connection to the runner's tunnel. The host links the vsock port to the tunnel's socket.
-var dialTunnel = func(port uint32) (net.Conn, error) {
-	c, err := dialVsock(hostCID, port)
-	if err != nil {
-		return nil, err
-	}
-	return c, nil
-}
+var dialTunnel = dialHost
 
 func writeSysctl(path, value string) error {
 	return os.WriteFile(path, []byte(value), 0o644)

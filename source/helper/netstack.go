@@ -316,12 +316,15 @@ var logGate logLimiter
 
 // logf writes one line to the helper's standard error, which reaches the build log. Past maxLogLines in a window it
 // drops lines, and the first line of the next window says how many.
-func logf(format string, a ...any) {
-	ok, dropped := logGate.allow(time.Now())
+func logf(format string, a ...any) { logGate.printf("net", format, a...) }
+
+// printf writes one line that starts with prefix to the helper's standard error, when the limiter allows it.
+func (l *logLimiter) printf(prefix, format string, a ...any) {
+	ok, dropped := l.allow(time.Now())
 	if dropped > 0 {
-		fmt.Fprintf(os.Stderr, "net: %d log lines were dropped in the last %d seconds\n", dropped, int(logWindow/time.Second))
+		fmt.Fprintf(os.Stderr, "%s: %d log lines were dropped in the last %d seconds\n", prefix, dropped, int(logWindow/time.Second))
 	}
 	if ok {
-		fmt.Fprintf(os.Stderr, "net: "+format+"\n", a...)
+		fmt.Fprintf(os.Stderr, "%s: %s\n", prefix, fmt.Sprintf(format, a...))
 	}
 }
