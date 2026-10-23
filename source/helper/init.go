@@ -182,7 +182,7 @@ func startInitLeaseWatchdog() {
 	startLeaseWatchdog(
 		context.Background(),
 		func() ([]byte, error) { return os.ReadFile("/proc/cmdline") },
-		func(port uint32) (net.Conn, error) { return dialVsock(hostCID, port) },
+		dialHost,
 		powerOff,
 	)
 }

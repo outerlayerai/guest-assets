@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -82,9 +84,9 @@ func (c *vsockConn) peerCID() (uint32, error) {
 	return vm.CID, nil
 }
 
-// dialVsock connects to the given CID and port.
-func dialVsock(cid, port uint32) (*vsockConn, error) {
-	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+// dialVsock connects to the given CID and port, and waits at most timeout for the peer to answer.
+func dialVsock(cid, port uint32, timeout time.Duration) (*vsockConn, error) {
+	fd, err := vsockSocket(timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -93,6 +95,21 @@ func dialVsock(cid, port uint32) (*vsockConn, error) {
 		return nil, err
 	}
 	return newVsockConn(fd)
+}
+
+// vsockSocket opens a vsock stream socket whose connect waits at most timeout for the peer to answer. Without the
+// option the kernel waits two seconds. It reads a zero as that default, so the shortest wait is one microsecond.
+func vsockSocket(timeout time.Duration) (int, error) {
+	fd, err := unix.Socket(unix.AF_VSOCK, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return -1, err
+	}
+	tv := unix.NsecToTimeval(max(timeout, time.Microsecond).Nanoseconds())
+	if err := unix.SetsockoptTimeval(fd, unix.AF_VSOCK, unix.SO_VM_SOCKETS_CONNECT_TIMEOUT, &tv); err != nil {
+		unix.Close(fd)
+		return -1, fmt.Errorf("set the connect timeout: %w", err)
+	}
+	return fd, nil
 }
 
 type vsockListener struct {
@@ -204,19 +221,26 @@ func runRelay(args []string) int {
 		}
 		listeners = append(listeners, l)
 	}
+	gate := make(chan struct{}, maxInFlightDials)
 	var wg sync.WaitGroup
 	for i, l := range listeners {
 		wg.Add(1)
 		go func(l net.Listener, port uint16) {
 			defer wg.Done()
-			relayAccept(l, func() (net.Conn, error) { return dialVsock(hostCID, uint32(port)) }, port)
+			relayAccept(l, func() (net.Conn, error) { return dialHost(uint32(port)) }, port, gate)
 		}(l, uint16(ports[i]))
 	}
 	wg.Wait()
 	return 1
 }
 
-func relayAccept(l net.Listener, dial func() (net.Conn, error), port uint16) {
+// relayLog limits the relay's lines about connections it refuses at its limit.
+var relayLog logLimiter
+
+// relayAccept carries each connection that l accepts to the host. A dial holds a thread while it waits for the host,
+// and the Go runtime stops the process at 10,000 threads. So gate holds one token for each dial in progress, and
+// past its capacity a connection is refused at once.
+func relayAccept(l net.Listener, dial func() (net.Conn, error), port uint16, gate chan struct{}) {
 	for {
 		c, err := l.Accept()
 		if err != nil {
@@ -227,16 +251,53 @@ func relayAccept(l net.Listener, dial func() (net.Conn, error), port uint16) {
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
+		select {
+		case gate <- struct{}{}:
+		default:
+			relayLog.printf("relay", "%d connections wait for the host; refusing one on port %d", cap(gate), port)
+			go refuse(c, refuseWait, fmt.Sprintf("the microVM's relay already waits for the runner on %d connections", cap(gate)))
+			continue
+		}
 		go func() {
 			up, err := dial()
+			<-gate
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "relay: dial host vsock port %d: %v\n", port, err)
-				c.Close()
+				refuse(c, refuseWait, fmt.Sprintf("the microVM's relay could not reach the runner on vsock port %d: %v", port, err))
 				return
 			}
 			proxy(c, up)
 		}()
 	}
+}
+
+// refuseWait is how long the relay reads from a client whose connection it cannot carry, before it closes it.
+const refuseWait = 2 * time.Second
+
+// refuse closes a client's connection that the relay could not carry to the host. A close while the client's bytes
+// are still unread sends a reset, which the client reports as a dropped connection and not as a failed connect. So
+// refuse reads what the client sent first, and ends its side with a FIN. A client whose first line is an HTTP request,
+// such as a CONNECT to the tunnel, gets a 502 answer that gives the reason. Reading goes on until the client closes
+// or the wait is over.
+func refuse(c net.Conn, wait time.Duration, reason string) {
+	defer c.Close()
+	_ = c.SetDeadline(time.Now().Add(wait))
+	br := bufio.NewReader(c)
+	if line, err := br.ReadSlice('\n'); err == nil && isHTTPRequestLine(line) {
+		body := reason + "\n"
+		_, _ = fmt.Fprintf(c, "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+	}
+	if cw, ok := c.(closeWriter); ok {
+		_ = cw.CloseWrite()
+	}
+	_, _ = io.Copy(io.Discard, br)
+}
+
+// isHTTPRequestLine reports whether line is the first line of an HTTP/1 request, such as
+// "CONNECT registry.npmjs.org:443 HTTP/1.1".
+func isHTTPRequestLine(line []byte) bool {
+	fields := strings.Fields(string(line))
+	return len(fields) == 3 && strings.HasPrefix(fields[2], "HTTP/1.")
 }
 
 type closeWriter interface{ CloseWrite() error }
