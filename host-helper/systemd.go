@@ -37,7 +37,8 @@ const (
 	// killHeadroomBytes is added to the guest's memory where the kernel kills the unit's processes.
 	killHeadroomBytes = 1024 * 1024 * 1024
 	unitPrefix        = "outerlayer-build-"
-	unitSlice         = "system.slice"
+	// defaultSlice holds the builds of a runner whose config names no slice.
+	defaultSlice = "system.slice"
 	// cleanupMarginMinutes is added to the runner's time limit. It matches the stop margin of the runner's own service unit.
 	cleanupMarginMinutes = 10
 )
@@ -46,6 +47,26 @@ const (
 // disk that acts on weights, and a build that runs alone is not slowed. Setting the property also turns on the io
 // controller for the unit. No request field changes it.
 const ioWeight = 100
+
+// buildSlice is the slice that holds this runner's builds.
+func (c Config) buildSlice() string {
+	if c.Slice == "" {
+		return defaultSlice
+	}
+	return c.Slice
+}
+
+// sliceCgroupPath is the cgroup path of a slice below the cgroup root. A dash in a slice name nests it: systemd keeps
+// a-b-c.slice at a.slice/a-b.slice/a-b-c.slice. The jailer needs this path, and so does the read of the kill count.
+func sliceCgroupPath(slice string) string {
+	name := strings.TrimSuffix(slice, ".slice")
+	parts := strings.Split(name, "-")
+	path := make([]string, 0, len(parts))
+	for i := range parts {
+		path = append(path, strings.Join(parts[:i+1], "-")+".slice")
+	}
+	return strings.Join(path, "/")
+}
 
 // UnitName is the transient unit that holds one build.
 func UnitName(id string) string { return unitPrefix + id }
@@ -90,7 +111,7 @@ func startArgv(cfg Config, id string, uid int, memoryMiB int, timeLimitMinutes i
 	argv := []string{
 		"--unit", unit,
 		"--description", "OuterLayer microVM " + id,
-		"--slice", unitSlice,
+		"--slice", cfg.buildSlice(),
 		"--quiet",
 		"--property", "Type=exec",
 		"--property", "RemainAfterExit=yes",
@@ -112,7 +133,7 @@ func startArgv(cfg Config, id string, uid int, memoryMiB int, timeLimitMinutes i
 		"--chroot-base-dir", cfg.JailBase,
 		"--new-pid-ns",
 		"--cgroup-version", "2",
-		"--parent-cgroup", unitSlice+"/"+unit+".service",
+		"--parent-cgroup", sliceCgroupPath(cfg.buildSlice())+"/"+unit+".service",
 		"--",
 		"--no-api",
 		"--config-file", "/vm.json",
@@ -125,6 +146,8 @@ const exitTypeMinVersion = 250
 type realSystemdRunner struct {
 	systemdRun, systemctl string
 	cgroupRoot            string
+	// slice holds the builds; empty means system.slice.
+	slice string
 	// version reports the systemd version, or 0 when it cannot be read. It is read once.
 	version     func() int
 	versionOnce sync.Once
@@ -184,7 +207,7 @@ func findTool(name string) (string, error) {
 }
 
 // realSystemd runs the real systemd-run and systemctl.
-func realSystemd() (Systemd, error) {
+func realSystemd(slice string) (Systemd, error) {
 	run, err := findTool("systemd-run")
 	if err != nil {
 		return nil, err
@@ -193,7 +216,7 @@ func realSystemd() (Systemd, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &realSystemdRunner{systemdRun: run, systemctl: ctl, cgroupRoot: "/sys/fs/cgroup"}, nil
+	return &realSystemdRunner{systemdRun: run, systemctl: ctl, cgroupRoot: "/sys/fs/cgroup", slice: slice}, nil
 }
 
 func output(cmd *exec.Cmd) (string, error) {
@@ -273,7 +296,11 @@ var oomKillLine = regexp.MustCompile(`(?m)^oom_kill (\d+)$`)
 // OOMKills is the kernel's count of kills in the unit's cgroup. systemd removes the cgroup, and its memory.events,
 // when the unit ends, so a unit that ended with Result=oom-kill counts as one kill.
 func (r *realSystemdRunner) OOMKills(unit string) (int, error) {
-	data, err := os.ReadFile(filepath.Join(r.cgroupRoot, unitSlice, unit+".service", "memory.events"))
+	slice := r.slice
+	if slice == "" {
+		slice = defaultSlice
+	}
+	data, err := os.ReadFile(filepath.Join(r.cgroupRoot, sliceCgroupPath(slice), unit+".service", "memory.events"))
 	if err != nil && !os.IsNotExist(err) {
 		return 0, err
 	}

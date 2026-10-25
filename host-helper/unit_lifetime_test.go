@@ -136,7 +136,7 @@ func fakeSystemctl(t *testing.T, result string) (*realSystemdRunner, string) {
 
 func TestTheKernelsCountOfKillsInTheLiveCgroupIsReported(t *testing.T) {
 	real, _ := fakeSystemctl(t, "success")
-	cg := filepath.Join(real.cgroupRoot, unitSlice, UnitName(testBuild)+".service")
+	cg := filepath.Join(real.cgroupRoot, defaultSlice, UnitName(testBuild)+".service")
 	if err := os.MkdirAll(cg, 0o755); err != nil {
 		t.Fatal(err)
 	}
