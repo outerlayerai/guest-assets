@@ -35,9 +35,19 @@ type Config struct {
 	Jailer             Binary `json:"jailer"`
 	Firecracker        Binary `json:"firecracker"`
 	FirecrackerVersion string `json:"firecrackerVersion"`
+	// Slice is the systemd slice that holds every build of this runner, such as "acme-runner-builds.slice". Empty
+	// means system.slice. The installer writes the slice unit with the memory and CPU limits of all the builds together.
+	Slice string `json:"slice"`
 }
 
 var sha256Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// slicePattern matches a slice unit name: dash-separated parts of letters, digits, ":", "_" and ".", then ".slice". A
+// dash nests a slice under the slice named by the parts before it, so a part may not be empty.
+var slicePattern = regexp.MustCompile(`^[A-Za-z0-9:_.]+(-[A-Za-z0-9:_.]+)*\.slice$`)
+
+// maxSliceName is systemd's limit on a unit name.
+const maxSliceName = 255
 
 // maxUID keeps every build user below 2^31, because some tools read an id as a signed 32-bit number.
 const maxUID = 2_147_483_647
@@ -56,6 +66,9 @@ func (c Config) Validate() error {
 		if !sha256Pattern.MatchString(sum) {
 			return fmt.Errorf("%s must be 64 lower-case hex digits", name)
 		}
+	}
+	if c.Slice != "" && (len(c.Slice) > maxSliceName || !slicePattern.MatchString(c.Slice)) {
+		return fmt.Errorf("slice %q is not the name of a slice unit", c.Slice)
 	}
 	if c.UIDCount < 1 || c.UIDBase < 1 || c.UIDBase+c.UIDCount > maxUID {
 		return fmt.Errorf("the build user range %d+%d is empty or out of bounds", c.UIDBase, c.UIDCount)

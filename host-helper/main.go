@@ -380,16 +380,22 @@ func (h *Helper) ServeConn(conn *net.UnixConn) {
 	_, _ = conn.Write(append(data, '\n'))
 }
 
+// newSystemd builds the systemd client for serve. A test replaces it to see what serve gives it.
+var newSystemd = realSystemd
+
+// serveTrustedUID owns the config file and the trust root. Only root may, and a test sets it to the test's own user.
+var serveTrustedUID = 0
+
 func serve(configPath string) error {
-	cfg, err := LoadConfig(configPath, 0)
+	cfg, err := LoadConfig(configPath, serveTrustedUID)
 	if err != nil {
 		return err
 	}
-	sys, err := realSystemd()
+	sys, err := newSystemd(cfg.Slice)
 	if err != nil {
 		return err
 	}
-	h, err := NewHelper(cfg, sys, Ops{TrustRoot: "/", TrustedUID: 0})
+	h, err := NewHelper(cfg, sys, Ops{TrustRoot: "/", TrustedUID: serveTrustedUID})
 	if err != nil {
 		return err
 	}
