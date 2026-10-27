@@ -50,20 +50,27 @@ type closeCounter struct {
 
 func (c *closeCounter) Close() error { c.n.Add(1); return c.Conn.Close() }
 
-func newRig(t *testing.T) *rig {
+func newRig(t *testing.T) *rig { return newRigWith(t, nil) }
+
+// newRigWith builds the rig with the helper's stack reaching the tunnel through dial, or through in-memory pipes that
+// the rig records when dial is nil.
+func newRigWith(t *testing.T, dial dialFunc) *rig {
 	t.Helper()
 	r := &rig{t: t, names: newNameMap(nil, 0), tunnel: make(chan net.Conn, 16), near: make(chan net.Conn, 16)}
 	// A full queue drops a packet. A test opens up to maxInFlightDials connections at once, and a SYN dropped on its
 	// retries too can miss the dial's five-second timeout, so each queue holds several times that many packets.
 	serverEP := channel.New(4*maxInFlightDials, 1500, "")
 	clientEP := channel.New(4*maxInFlightDials, 1500, "")
-	ns, err := newNetStack(serverEP, r.names, func() (net.Conn, error) {
-		r.dials.Add(1)
-		near, far := net.Pipe()
-		r.tunnel <- far
-		r.near <- near
-		return &closeCounter{Conn: near, n: &r.closed}, nil
-	})
+	if dial == nil {
+		dial = func() (net.Conn, error) {
+			r.dials.Add(1)
+			near, far := net.Pipe()
+			r.tunnel <- far
+			r.near <- near
+			return &closeCounter{Conn: near, n: &r.closed}, nil
+		}
+	}
+	ns, err := newNetStack(serverEP, r.names, dial)
 	if err != nil {
 		t.Fatal(err)
 	}
