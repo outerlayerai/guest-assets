@@ -70,6 +70,7 @@ jobs:
           subject-path: |
             out/vmlinux-x86_64
             out/outerlayer-guest-x86_64
+            out/outerlayer-guest-aarch64
             out/outerlayer-host-helper-x86_64
 
       - name: Publish

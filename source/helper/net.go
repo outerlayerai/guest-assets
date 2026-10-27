@@ -11,10 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
+	"unsafe"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/link/fdbased"
 	"gvisor.dev/gvisor/pkg/tcpip/link/tun"
@@ -36,9 +39,28 @@ const (
 // dialTunnel opens a connection to the runner's tunnel. The host links the vsock port to the tunnel's socket.
 var dialTunnel = dialHost
 
+// writeSysctl sets a kernel setting unless it already has the value. A container's /proc/sys is read-only, so beside a
+// container build the runner sets the values when it starts the container, and the helper only finds them set.
 func writeSysctl(path, value string) error {
+	if current, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(current)) == value {
+		return nil
+	}
 	return os.WriteFile(path, []byte(value), 0o644)
 }
+
+// dropCapabilities clears every capability of every thread of the process. The helper keeps its device, its route and
+// its sockets, but can change nothing more, so a build that shares its network meets a helper with no privilege.
+func dropCapabilities() error {
+	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	var data [2]unix.CapUserData
+	if _, _, errno := syscall.AllThreadsSyscall(unix.SYS_CAPSET, uintptr(unsafe.Pointer(&header)), uintptr(unsafe.Pointer(&data[0])), 0); errno != 0 {
+		return fmt.Errorf("drop the helper's capabilities: %w", errno)
+	}
+	return nil
+}
+
+// dropPrivileges is dropCapabilities, replaced in tests.
+var dropPrivileges = dropCapabilities
 
 // tunSysctls lists the kernel settings the device needs, as path and value. IPv6 stays off because the stack has no
 // IPv6, and a link-local address would let the kernel start neighbour discovery. The reverse path filter stays off
@@ -109,6 +131,11 @@ func setupTunDevice(name string) error {
 type netConfig struct {
 	tun, dns, ready, hosts string
 	tunnelPort             uint32
+	// relay, when set, is the TCP address of the build's relay. The helper then runs beside a container build and reaches
+	// the tunnel through the relay instead of over vsock.
+	relay string
+	// dropPrivileges clears every capability once the device, its route and the name server are up.
+	dropPrivileges bool
 }
 
 // parseNetFlags reads the options of the net command. The second result is 0 for a good command line and otherwise
@@ -120,6 +147,8 @@ func parseNetFlags(args []string) (netConfig, int) {
 	tunnelPort := fs.Uint("tunnel-port", 3128, "vsock port of the runner's tunnel")
 	ready := fs.String("ready", defaultReady, "file to create once the route and the DNS server are up")
 	hosts := fs.String("hosts", "/etc/hosts", "hosts file whose names keep their own address")
+	relay := fs.String("relay", "", "TCP address of the build's relay, which the helper reaches the tunnel through instead of vsock")
+	drop := fs.Bool("drop-privileges", false, "clear every capability once the device, its route and the name server are up")
 	if err := fs.Parse(args); err != nil {
 		return netConfig{}, 2
 	}
@@ -127,7 +156,13 @@ func parseNetFlags(args []string) (netConfig, int) {
 		fmt.Fprintln(os.Stderr, "net: --tunnel-port must be a port")
 		return netConfig{}, 2
 	}
-	return netConfig{tun: *tunName, dns: *dnsAddr, ready: *ready, hosts: *hosts, tunnelPort: uint32(*tunnelPort)}, 0
+	if *relay != "" {
+		if _, port, err := net.SplitHostPort(*relay); err != nil || port == "" {
+			fmt.Fprintln(os.Stderr, "net: --relay must be an address and a port")
+			return netConfig{}, 2
+		}
+	}
+	return netConfig{tun: *tunName, dns: *dnsAddr, ready: *ready, hosts: *hosts, tunnelPort: uint32(*tunnelPort), relay: *relay, dropPrivileges: *drop}, 0
 }
 
 // writeReady creates the ready file in one step, so a reader never finds it half written.
@@ -140,6 +175,20 @@ func writeReady(path string) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	return nil
+}
+
+// tunnelDialer opens the network stack's connections to the tunnel: over vsock inside a microVM, or through the build's
+// relay beside a container build.
+func tunnelDialer(cfg netConfig) dialFunc {
+	if cfg.relay != "" {
+		relay := newRelayDialer(cfg.relay)
+		_, portText, _ := net.SplitHostPort(cfg.relay)
+		var port uint32
+		fmt.Sscanf(portText, "%d", &port)
+		return func() (net.Conn, error) { return relay.dial(port) }
+	}
+	port := cfg.tunnelPort
+	return func() (net.Conn, error) { return dialTunnel(port) }
 }
 
 func runNet(args []string) int {
@@ -177,8 +226,7 @@ func runNet(args []string) int {
 	if err != nil {
 		return fail("attach to %s: %v", *tunName, err)
 	}
-	port := cfg.tunnelPort
-	ns, err := newNetStack(link, names, func() (net.Conn, error) { return dialTunnel(port) })
+	ns, err := newNetStack(link, names, tunnelDialer(cfg))
 	if err != nil {
 		return fail("%v", err)
 	}
@@ -187,6 +235,13 @@ func runNet(args []string) int {
 	}
 	go serveDNSUDP(pc, names)
 	go serveDNSTCP(tl, names)
+
+	// Before the ready file, so no build starts beside a helper that still holds a capability.
+	if cfg.dropPrivileges {
+		if err := dropPrivileges(); err != nil {
+			return fail("%v", err)
+		}
+	}
 
 	// The file appears only after the route and the name server work, so a build step never starts without them.
 	if err := writeReady(cfg.ready); err != nil {

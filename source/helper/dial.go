@@ -33,6 +33,8 @@ type hostDialer struct {
 	pause, maxPause time.Duration
 	// logf, when set, reports a dial that needed more than one attempt.
 	logf func(format string, a ...any)
+	// retry, when set, decides which failed attempts are made again. It is retryableDialError when unset.
+	retry func(error) bool
 }
 
 // dialGate limits the dialer's log lines, as logGate limits the network stack's.
@@ -49,6 +51,26 @@ var hostVsock = hostDialer{
 
 // dialHost connects to the host's vsock port.
 func dialHost(port uint32) (net.Conn, error) { return hostVsock.dial(port) }
+
+// newRelayDialer returns the dialer that reaches the build's relay at addr over TCP. The helper uses it when it runs
+// beside a container build instead of inside a microVM. The relay can start after the helper, so a refused connect is
+// made again until the dialer's time is spent.
+func newRelayDialer(addr string) hostDialer {
+	return hostDialer{
+		connect:  func(_ uint32, timeout time.Duration) (net.Conn, error) { return net.DialTimeout("tcp", addr, timeout) },
+		timeout:  hostDialTimeout,
+		pause:    hostDialPause,
+		maxPause: hostDialMaxPause,
+		logf:     func(format string, a ...any) { dialGate.printf("relay", format, a...) },
+		retry:    retryableRelayError,
+	}
+}
+
+// retryableRelayError reports whether a connect to the relay can succeed when it is made again: any error that a
+// vsock connect may retry, and a refusal, which means the relay does not listen yet.
+func retryableRelayError(err error) bool {
+	return retryableDialError(err) || errors.Is(err, unix.ECONNREFUSED)
+}
 
 // connectHost makes one attempt to connect to the host's vsock port.
 func connectHost(port uint32, timeout time.Duration) (net.Conn, error) {
@@ -67,6 +89,10 @@ func (d hostDialer) dial(port uint32) (net.Conn, error) {
 	start := time.Now()
 	deadline := start.Add(d.timeout)
 	pause := d.pause
+	retryable := d.retry
+	if retryable == nil {
+		retryable = retryableDialError
+	}
 	var first error
 	for attempt := 1; ; attempt++ {
 		c, err := d.connect(port, time.Until(deadline))
@@ -79,7 +105,7 @@ func (d hostDialer) dial(port uint32) (net.Conn, error) {
 		if first == nil {
 			first = err
 		}
-		if !retryableDialError(err) || time.Until(deadline) <= pause {
+		if !retryable(err) || time.Until(deadline) <= pause {
 			if attempt == 1 {
 				return nil, err
 			}

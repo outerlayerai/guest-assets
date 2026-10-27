@@ -4,6 +4,7 @@
 #
 # Builds the guest artefacts reproducibly:
 #   outerlayer-guest-x86_64  static guest helper (init, exec agent, relay, network stack)
+#   outerlayer-guest-aarch64 the same helper for arm64, which runs beside container builds on arm64 hosts
 #   vmlinux-x86_64           Firecracker guest kernel
 #
 # Usage: packages/cli/guest/build.sh <out-dir>
@@ -57,6 +58,7 @@ docker run --rm \
   sh -euc '
     go test ./...
     go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o /out/outerlayer-guest-x86_64 .
+    GOARCH=arm64 go build -trimpath -buildvcs=false -ldflags="-s -w -buildid=" -o /out/outerlayer-guest-aarch64 .
   '
 
 # Kernel: build in a fixed directory so embedded paths do not vary.
@@ -107,4 +109,4 @@ docker run --rm \
   '
 
 cd "$out"
-sha256sum vmlinux-x86_64 outerlayer-guest-x86_64
+sha256sum vmlinux-x86_64 outerlayer-guest-x86_64 outerlayer-guest-aarch64

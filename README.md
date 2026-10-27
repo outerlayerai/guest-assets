@@ -1,7 +1,8 @@
 # OuterLayer guest assets
 
-The guest kernel and guest helper that OuterLayer microVM builds boot, and
-the root helper that starts those microVMs under Firecracker's jailer.
+The guest kernel and guest helper that OuterLayer microVM builds boot, the
+root helper that starts those microVMs under Firecracker's jailer, and the
+guest helper that sets up the network of each container build.
 
 A runner with `builtin:vm` hooks runs each build in a Firecracker microVM.
 The first time it needs them, it downloads two files from this repository's
@@ -11,6 +12,11 @@ releases:
 - `outerlayer-guest-x86_64`: a static helper built from `source/helper/`. It
   is the microVM's init, runs the build's commands, and relays its
   connections to the runner over vsock.
+
+A runner with `builtin:container` hooks downloads the guest helper for its
+own architecture, `outerlayer-guest-x86_64` or `outerlayer-guest-aarch64`,
+and puts it in each build image. It runs in a network helper container
+beside the build, and sends the build's connections to the runner's relay.
 
 `outerlayer runner install --service` downloads a third file:
 
@@ -33,11 +39,11 @@ Pushing a tag `guest-<version>` runs `.github/workflows/publish.yml`. It:
 1. builds the kernel and the guest helper with `source/build.sh`, and the
    root helper with `host-helper/build.sh`, which runs the root helper's
    tests first;
-2. fails unless all three files match `SHA256SUMS`;
-3. publishes a release with the three files, the kernel config, the Linux
+2. fails unless all four files match `SHA256SUMS`;
+3. publishes a release with the four files, the kernel config, the Linux
    source the kernel was built from, the source of both helpers, and
    `SHA256SUMS`;
-4. records a signed build provenance attestation for the three files.
+4. records a signed build provenance attestation for the four files.
 
 A CLI release names the release it reads each file from. The guest files and
 the root helper can come from different releases.
@@ -74,8 +80,8 @@ gh attestation verify vmlinux-x86_64 --repo outerlayerai/guest-assets
 
 A runner with `builtin:vm` hooks builds a repository's image in a builder
 microVM, so no step of the repository's recipe runs on the host. The
-builder microVM boots the guest kernel above with a fourth file as its root
-disk:
+builder microVM boots the guest kernel above with a file of its own as its
+root disk:
 
 - `builder-rootfs-x86_64.ext4`: a Debian file system built from
   `builder-disk/`. It holds BuildKit, a Docker engine, the devcontainer CLI,

@@ -378,3 +378,57 @@ func typeName(e ast.Expr) string {
 	}
 	return "?"
 }
+
+// A container build's relay can start after the helper. A refused connect then means "not yet", so the relay's dialer
+// makes it again, while the vsock dialer still gives up at once on the same error.
+func TestARefusedConnectIsMadeAgainOnlyByTheRelayDialer(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		guest, host := net.Pipe()
+		defer host.Close()
+		defer guest.Close()
+
+		fake := &fakeHost{answer: failsFirst(2, unix.ECONNREFUSED, 0), conn: guest}
+		d := fake.dialer()
+		d.retry = retryableRelayError
+		c, err := d.dial(3128)
+		if err != nil {
+			t.Fatalf("the relay dialer failed: %v", err)
+		}
+		if fake.attempts() != 3 {
+			t.Fatalf("the relay dialer made %d attempts, want 3", fake.attempts())
+		}
+		mustCarry(t, c, host)
+
+		vsock := &fakeHost{answer: failsFirst(2, unix.ECONNREFUSED, 0), conn: guest}
+		if _, err := vsock.dialer().dial(3128); !errors.Is(err, unix.ECONNREFUSED) {
+			t.Fatalf("the vsock dialer gave %v, want the refusal", err)
+		}
+		if vsock.attempts() != 1 {
+			t.Fatalf("the vsock dialer made %d attempts, want 1", vsock.attempts())
+		}
+	})
+}
+
+func TestTheRelayDialerConnectsOverTCPToTheAddressGiven(t *testing.T) {
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		c, err := listener.Accept()
+		if err == nil {
+			accepted <- c
+		}
+	}()
+
+	c, err := newRelayDialer(listener.Addr().String()).dial(0)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close()
+	far := <-accepted
+	defer far.Close()
+	mustCarry(t, c, far)
+}
