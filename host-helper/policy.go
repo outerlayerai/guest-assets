@@ -74,7 +74,9 @@ const (
 	fileKernel = "kernel"
 	fileRootfs = "rootfs.ext4"
 	fileDisk   = "build.ext4"
-	fileVM     = "vm.json"
+	// fileSavedState is the one name a copy of a build's disk is written to, beside the disk.
+	fileSavedState = "saved-state.ext4"
+	fileVM         = "vm.json"
 )
 
 const maxVMConfig = 64 * 1024
