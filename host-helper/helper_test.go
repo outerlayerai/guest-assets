@@ -125,6 +125,8 @@ type fixture struct {
 	fstatEdit func(path string, st *unix.Stat_t)
 	// e2fsck answers a discard instead of the real program. Absent, it exits 0 and changes nothing.
 	e2fsck func(fd, uid, gid int, limit time.Duration) (int, string, error)
+	// clone, when set, answers a copy's reflink request instead of the file system. Absent, the real ioctl runs.
+	clone func(dst, src int) error
 	// e2fsckRuns records each discard's account and the path of the file it was given.
 	e2fsckRuns []e2fsckRun
 	// trustRoot replaces the directory the jail base's ancestry check starts below.
@@ -216,6 +218,12 @@ func (f *fixture) rebuild() {
 				f.fstatEdit(pathOf(fd), &st)
 			}
 			return st, err
+		},
+		Clone: func(dst, src int) error {
+			if f.clone != nil {
+				return f.clone(dst, src)
+			}
+			return unix.IoctlFileClone(dst, src)
 		},
 		RunE2fsck: func(fd, uid, gid int, limit time.Duration) (int, string, error) {
 			f.e2fsckRuns = append(f.e2fsckRuns, e2fsckRun{pathOf(fd), uid, gid})

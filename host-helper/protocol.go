@@ -22,6 +22,9 @@ const (
 	// OpDiscard gives the free blocks of a stopped builder microVM's cache disk back to the host. A helper from before
 	// this operation refuses it as bad-request.
 	OpDiscard = "discard"
+	// OpCopy copies a build's disk to one new file in the build's directory, as the runner saves a state. A helper from
+	// before this operation refuses it as bad-request.
+	OpCopy = "copy"
 )
 
 // Kinds of microVM a start can name. The kind changes nothing about the
@@ -79,4 +82,6 @@ type Reply struct {
 	OOMKills    *int     `json:"oomKills,omitempty"`
 	Builds      []string `json:"builds,omitempty"`
 	FreedBytes  *int64   `json:"freedBytes,omitempty"`
+	// CopiedBytes is the allocated size of the file a copy wrote.
+	CopiedBytes *int64 `json:"copiedBytes,omitempty"`
 }

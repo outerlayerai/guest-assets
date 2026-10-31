@@ -45,6 +45,9 @@ type Ops struct {
 	// Fstat reads the owner, type, mode and device of an open file. A test uses it to give a file an owner or a
 	// device the test account cannot create.
 	Fstat func(fd int) (unix.Stat_t, error)
+	// Clone makes dst share the data blocks of src. It fails when the file system has no reflinks. A test replaces it
+	// to force the sparse copy.
+	Clone func(dst, src int) error
 }
 
 // record is what the helper keeps about a build it started. It is written under the state directory, which is
@@ -95,6 +98,9 @@ func NewHelper(cfg Config, sys Systemd, ops Ops) (*Helper, error) {
 	}
 	if ops.Fstat == nil {
 		ops.Fstat = fstat
+	}
+	if ops.Clone == nil {
+		ops.Clone = func(dst, src int) error { return unix.IoctlFileClone(dst, src) }
 	}
 	if ops.RunE2fsck == nil {
 		ops.RunE2fsck = runE2fsck
@@ -148,7 +154,7 @@ func (h *Helper) Handle(peerUID int, req Request) Reply {
 	switch req.Op {
 	case OpList:
 		return h.list()
-	case OpStart, OpStop, OpState, OpRelink, OpDiscard:
+	case OpStart, OpStop, OpState, OpRelink, OpDiscard, OpCopy:
 		if !buildIDPattern.MatchString(req.Build) {
 			return refused(refuse(CodeBadBuild, "%q is not a build id: twelve lower-case hex digits", req.Build))
 		}
@@ -164,6 +170,8 @@ func (h *Helper) Handle(peerUID int, req Request) Reply {
 		return h.relink(req.Build)
 	case OpDiscard:
 		return h.discard(req.Build)
+	case OpCopy:
+		return h.copyDisk(req.Build)
 	default:
 		return h.state(req.Build)
 	}
@@ -334,6 +342,8 @@ const (
 	connDeadline = 30 * time.Second
 	// discardDeadline lets a connection outlast the e2fsck that a discard request runs.
 	discardDeadline = discardTimeout + time.Minute
+	// copyDeadline lets a connection outlast the copy that a copy request makes.
+	copyDeadline = copyTimeout + time.Minute
 )
 
 func peerUID(conn *net.UnixConn) (int, error) {
@@ -370,8 +380,11 @@ func (h *Helper) ServeConn(conn *net.UnixConn) {
 		case json.Unmarshal(line, &req) != nil:
 			reply = refused(refuse(CodeBadRequest, "the request is not one JSON object on a line"))
 		default:
-			if req.Op == OpDiscard {
+			switch req.Op {
+			case OpDiscard:
 				_ = conn.SetDeadline(time.Now().Add(discardDeadline))
+			case OpCopy:
+				_ = conn.SetDeadline(time.Now().Add(copyDeadline))
 			}
 			reply = h.Handle(peer, req)
 		}
