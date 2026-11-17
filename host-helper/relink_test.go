@@ -58,7 +58,7 @@ func TestRelinkPointsTheJailAtTheSocketsTheRunnerMadeAgain(t *testing.T) {
 	if reply.Unit != UnitName(testBuild) {
 		t.Fatalf("the reply names unit %q", reply.Unit)
 	}
-	for name, port := range map[string]string{"tunnel.sock": "3128", "gateway.sock": "3126", "claude.sock": "3127", "dest-0.sock": "3129", "lease.sock": "3125"} {
+	for name, port := range map[string]string{"tunnel.sock": "3128", "gateway.sock": "3126", "claude.sock": "3127", "openai.sock": "3124", "dest-0.sock": "3129", "lease.sock": "3125"} {
 		if !sameFile(t, filepath.Join(dir, name), filepath.Join(run, "v.sock_"+port)) {
 			t.Fatalf("v.sock_%s is not the runner's %s", port, name)
 		}

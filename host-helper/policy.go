@@ -35,13 +35,14 @@ func refuse(code, format string, args ...any) *Refusal {
 var buildIDPattern = regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 // The vsock ports the guest reaches, by the socket the runner serves for each.
-// They are the runner's: the relay and tunnel, the gateway, Claude, one port
+// They are the runner's: the relay and tunnel, the gateway, Claude, OpenAI, one port
 // per destination, and the lease stream the guest's watchdog reads.
 const (
 	portLease       = 3125
 	portTunnel      = 3128
 	portGateway     = 3126
 	portClaude      = 3127
+	portOpenAI      = 3124
 	portDestination = 3129
 	maxDestinations = 256
 )
@@ -58,6 +59,8 @@ func socketPort(name string) (int, bool) {
 		return portGateway, true
 	case "claude.sock":
 		return portClaude, true
+	case "openai.sock":
+		return portOpenAI, true
 	}
 	if match := destinationSocket.FindStringSubmatch(name); match != nil {
 		index, _ := strconv.Atoi(match[1])
